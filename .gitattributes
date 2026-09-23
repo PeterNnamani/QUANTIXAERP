@@ -1,0 +1,12 @@
+# Enforce consistent EOL handling
+* text=auto eol=lf
+
+# Prevent node_modules contents from being normalized or checked in
+node_modules/** -text
+
+# Lock files should remain normal text
+package-lock.json text
+pnpm-lock.yaml text
+
+# Ensure shell scripts keep LF if added
+*.sh text eol=lf
