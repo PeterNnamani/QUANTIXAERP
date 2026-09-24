@@ -28,6 +28,32 @@ type SpeechRecognitionInstance = {
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance
 
+function formatBusinessMemory(log: any) {
+  const action = String(log.action || log.type || 'ACTIVITY').toUpperCase()
+  const module = String(log.module || log.entity || log.type || 'Accounting')
+    .replace(/_/g, ' ')
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+  const record = log.metadata?.new || log.metadata?.old || {}
+  const recordName = record.name || record.full_name || record.product || record.username || record.email
+  const reference = String(log.reference || '')
+  const details = String(log.details || '')
+    .replace(reference ? new RegExp(reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : /$^/, '')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([|,.:;)])/g, '$1')
+    .trim()
+
+  if (recordName && /^(INSERT|CREATE|ADD)\b/i.test(action)) return `${recordName} added`
+  if (recordName && /^(UPDATE|EDIT)\b/i.test(action)) return `${recordName} updated`
+  if (recordName && /^(DELETE|REMOVE)\b/i.test(action)) return `${recordName} deleted`
+  if (details && !/^(INSERT|UPDATE|DELETE)\s+.+\s+record\s*$/i.test(details)) return details
+  if (action === 'INSERT' || action === 'CREATE' || action === 'ADD') return `${module} added`
+  if (action === 'UPDATE' || action === 'EDIT') return `${module} updated`
+  if (action === 'DELETE' || action === 'REMOVE') return `${module} deleted`
+  return `${module}: ${action.toLowerCase()}`
+}
+
 export default function AppLayout({ children }: { children: ReactNode }) {
   const { user, subscriptionLoaded, logout, state } = useAccounting()
   const router = useRouter()
@@ -340,7 +366,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
                     {state.auditLogs.slice(0, 3).map((log) => (
                       <div className="quantixa-memory-item" key={log.id}>
                         <span>{new Date(log.timestamp).toLocaleDateString()}</span>
-                        <p>{log.action} {log.reference || log.type}</p>
+                        <p>{formatBusinessMemory(log)}</p>
                       </div>
                     ))}
                     {state.auditLogs.length === 0 && <p>No business activity has been recorded yet.</p>}

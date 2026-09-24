@@ -33,3 +33,6 @@ coverage/
 
 # pnpm store
 .pnpm/
+
+.vercel
+.env*

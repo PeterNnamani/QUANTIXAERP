@@ -266,19 +266,6 @@ export default function DashboardPage() {
     leave: 4,
   }
 
-  const recentActivityBase = state.auditLogs.length
-    ? state.auditLogs
-    : [
-      ...state.sales.slice(0, 2).map((sale) => ({ timestamp: sale.date, action: `Sale recorded for ${sale.customer}` })),
-      ...state.purchases.slice(0, 2).map((purchase) => ({ timestamp: purchase.date, action: `Purchase recorded from ${purchase.supplier}` })),
-      ...state.expenses.slice(0, 1).map((expense) => ({ timestamp: expense.date, action: `Expense logged for ${expense.desc}` })),
-    ]
-
-  const activityFeed = recentActivityBase.slice(0, 5).map((log) => ({
-    time: new Date(log.timestamp || new Date()).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
-    message: log.action,
-  }))
-
   const notifications = [
     'Low stock on 24 products',
     'Supplier payment overdue',
@@ -567,20 +554,6 @@ export default function DashboardPage() {
                 <span>Due Today</span>
                 <strong>{formatCurrency(Math.min(totalPurchases * 0.05, 95000))}</strong>
               </div>
-            </div>
-          </article>
-        </section>
-
-        <section className="dashboard-split-grid activity-assistant-grid">
-          <article className="card activity-card compact">
-            <div className="card-title">Recent Activity</div>
-            <div className="activity-list">
-              {activityFeed.map((item, index) => (
-                <div key={`${item.time}-${index}`} className="activity-item">
-                  <div className="activity-time">{item.time}</div>
-                  <div className="activity-message">{item.message}</div>
-                </div>
-              ))}
             </div>
           </article>
         </section>
