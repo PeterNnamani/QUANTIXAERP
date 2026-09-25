@@ -119,24 +119,15 @@ export default function DashboardPage() {
   const rangeDays = rangeDaysMap[selectedRange]
 
   const chartBuckets = useMemo(() => {
-    const buckets: Array<{ start: Date; end: Date }> = []
     const endDate = new Date(todayKey)
     const startDate = new Date(endDate)
     startDate.setDate(endDate.getDate() - rangeDays + 1)
-    const bucketSize = Math.ceil(rangeDays / 7)
-    let cursor = new Date(startDate)
-
-    for (let i = 0; i < 7; i += 1) {
-      const bucketStart = new Date(cursor)
+    return Array.from({ length: 7 }, (_, index) => {
+      const bucketStart = new Date(startDate)
+      bucketStart.setDate(startDate.getDate() + Math.floor((index * rangeDays) / 7))
       const bucketEnd = new Date(bucketStart)
-      bucketEnd.setDate(bucketStart.getDate() + bucketSize - 1)
-      if (bucketEnd > endDate) bucketEnd.setTime(endDate.getTime())
-      buckets.push({ start: new Date(bucketStart), end: new Date(bucketEnd) })
-      cursor.setDate(bucketStart.getDate() + bucketSize)
-      if (cursor > endDate) cursor = new Date(endDate)
-    }
-
-    return buckets
+      bucketEnd.setDate(startDate.getDate() + Math.floor(((index + 1) * rangeDays) / 7) - 1)
+      return { start: bucketStart, end: bucketEnd }
   }, [selectedRange, todayKey, rangeDays])
 
   const chartData = useMemo(
@@ -422,7 +413,7 @@ export default function DashboardPage() {
                           <div
                             key={bar.className}
                             className={`financial-performance-bar-fill ${bar.className}`}
-                            style={{ height: `${Math.max((Math.abs(bar.value) / chartMax) * 100, 12)}%` }}
+                            style={{ height: `${Math.max((Math.abs(bar.value) / chartMax) * 100, bar.value === 0 ? 2 : 4)}%` }}
                             title={`${bar.className}: ${formatCurrency(bar.value)}`}
                           />
                         ))}
