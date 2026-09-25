@@ -22,6 +22,28 @@ async function upsertSaleWithSchemaFallback(saleRow: Record<string, unknown>) {
     return { data: null, error: new Error('Sale could not match the database schema.') }
 }
 
+async function ensureSalesPostingAccounts(companyId: string) {
+    const requiredAccounts = [
+        { code: `1000-${companyId.replaceAll('-', '').slice(0, 12)}`, name: 'Cash', account_type: 'ASSET', account_subtype: 'CURRENT_ASSET', normal_balance: 'DEBIT', is_control_account: true },
+        { code: `4000-${companyId.replaceAll('-', '').slice(0, 12)}`, name: 'Sales Revenue', account_type: 'INCOME', account_subtype: 'OPERATING_INCOME', normal_balance: 'CREDIT', is_control_account: false },
+    ]
+    const { data: existingAccounts, error: lookupError } = await supabaseAdmin!
+        .from('chart_of_accounts')
+        .select('name')
+        .eq('company_id', companyId)
+        .in('name', requiredAccounts.map((account) => account.name))
+    if (lookupError) throw lookupError
+
+    const existingNames = new Set((existingAccounts || []).map((account) => account.name))
+    const missingAccounts = requiredAccounts
+        .filter((account) => !existingNames.has(account.name))
+        .map((account) => ({ ...account, company_id: companyId, currency: 'NGN', is_active: true }))
+    if (missingAccounts.length === 0) return
+
+    const { error: insertError } = await supabaseAdmin!.from('chart_of_accounts').insert(missingAccounts)
+    if (insertError) throw insertError
+}
+
 function formatErrorMessage(error: unknown): string {
     if (!error) return 'Unknown server error'
     if (error instanceof Error) return error.message
@@ -114,6 +136,7 @@ export async function POST(request: Request) {
         if (itemError) throw itemError
 
         if (String(sale.paymentStatus || '').toUpperCase() === 'PAID') {
+            await ensureSalesPostingAccounts(companyId)
             const { error: postingError } = await supabaseAdmin.rpc('post_accounting_cash_movement', {
                 p_company_id: companyId,
                 p_source_module: 'SALES_PAYMENT',
