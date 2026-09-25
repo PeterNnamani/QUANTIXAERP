@@ -124,7 +124,7 @@ export default function PayrollPage() {
                 banks: { ...state.banks, [bank?.name || payment.bankName]: Number(result.bankBalance) }, bankTxns: [result.bankTransaction, ...state.bankTxns],
                 expenses: [{ id: payment.id, date: payment.payDate, desc: `Payroll payment - ${payment.staffName}`, category: 'Salary', amount: payment.totalAmount, bank: payment.bankName, notes: payment.reference || '', status: 'Paid', enteredBy: user.name }, ...state.expenses],
                 journalEntries: result.journalEntry ? [result.journalEntry, ...state.journalEntries] : state.journalEntries, journalLines: result.journalLines ? [...result.journalLines, ...state.journalLines] : state.journalLines,
-            })
+            }, { persist: false })
             setInlineNotice({ message: `${formatMoney(payment.totalAmount, payment.currency)} paid to ${payment.staffName}. ${payment.bankName} was updated.`, tone: 'success' })
             resetPaymentForm()
         } catch (error) {
