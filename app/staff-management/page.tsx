@@ -15,6 +15,7 @@ const genderOptions = ['Female', 'Male', 'Other']
 const departmentOptions = ['Sales', 'Inventory', 'Accounting', 'HR', 'Operations']
 const positionOptions = ['Sales Manager', 'Cashier', 'Store Officer', 'Accountant', 'HR Officer']
 const permissionOptions: { key: PermissionKey; label: string }[] = [
+  { key: 'dashboard', label: 'Dashboard' },
   { key: 'sales', label: 'Sales' },
   { key: 'inventory', label: 'Inventory' },
   { key: 'productManager', label: 'Product Manager' },
@@ -31,6 +32,7 @@ const permissionOptions: { key: PermissionKey; label: string }[] = [
   { key: 'tax', label: 'Tax' },
   { key: 'customers', label: 'Customer Management' },
   { key: 'suppliers', label: 'Supplier Management' },
+  { key: 'supplierBalances', label: 'Supplier Balances' },
   { key: 'accounting', label: 'Accounting & Ledger' },
   { key: 'reports', label: 'Reports & Analytics' },
   { key: 'monthlyReport', label: 'Monthly Report' },
@@ -151,6 +153,7 @@ export default function StaffManagementPage() {
   }
 
   const resetForm = () => {
+    const defaultRoleId = roles[0]?.id || 'cashier'
     setFirstName('')
     setLastName('')
     setPhone('')
@@ -165,9 +168,9 @@ export default function StaffManagementPage() {
     setSalary('')
     setBranch(branchOptions[0])
     setUsername('')
-    setRoleId(state.roles[0]?.id || 'cashier')
+    setRoleId(defaultRoleId)
     setRoleTitle('')
-    setAccessLevels({})
+    setAccessLevels(getRoleAccessLevels(roles.find((role) => role.id === defaultRoleId)))
     setMenuAccessOpen(false)
     setOpenAccessMenu(null)
     setStatus('active')

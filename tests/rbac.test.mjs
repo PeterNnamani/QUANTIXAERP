@@ -115,3 +115,26 @@ test('custom staff access keeps view-only menus visible without edit access', ()
     assert.equal(canEditPermission(staff, 'sales'), true)
     assert.ok(getVisibleNavigationItems(staff).some((item) => item.href === '/sales'))
 })
+
+test('explicit staff menu selections override role defaults', () => {
+    const staff = {
+        role: 'accountant',
+        accessLevels: { dashboard: 'view', expenses: 'view' },
+    }
+
+    const hrefs = getVisibleNavigationItems(staff).map((item) => item.href)
+    assert.ok(hrefs.includes('/dashboard'))
+    assert.ok(hrefs.includes('/expenses'))
+    assert.ok(!hrefs.includes('/sales'))
+    assert.ok(!hrefs.includes('/ledger'))
+    assert.equal(canAccessRoute(staff, '/expenses'), true)
+    assert.equal(canAccessRoute(staff, '/sales'), false)
+})
+
+test('an explicitly empty access map grants no menus', () => {
+    const staff = { role: 'accountant', accessLevels: {} }
+
+    assert.deepEqual(getVisibleNavigationItems(staff), [])
+    assert.equal(canAccessRoute(staff, '/dashboard'), false)
+    assert.equal(canAccessRoute(staff, '/expenses'), false)
+})

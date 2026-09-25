@@ -261,8 +261,7 @@ export function getPermissionAccessLevel(
     if (!user) return null
     const normalizedRole = String(user.role || '').toLowerCase().replace(/[_\s]+/g, '-')
     const isOwner = normalizedRole === 'business-owner' || normalizedRole === 'md'
-    if (user.accessLevels?.[permission]) return user.accessLevels[permission] || null
-    if (isOwner && user.accessLevels) {
+    if (user.accessLevels !== undefined) {
         const selectedLevel = user.accessLevels[permission]
         if (permission === 'bankTxn' || permission === 'banks') return selectedLevel === 'edit' ? 'view' : selectedLevel || null
         return selectedLevel || null
@@ -275,15 +274,6 @@ export function getPermissionAccessLevel(
         if (normalizedRole === 'super-admin') return 'edit'
         return 'view'
     }
-    const broadPermission: PermissionKey | undefined =
-        ['bankTxn', 'banks', 'dailyClose', 'ledger', 'payables', 'prepayments', 'supplierRebates', 'loans', 'tax'].includes(permission)
-            ? 'accounting'
-            : ['monthlyReport', 'annualReport', 'assetSchedule'].includes(permission)
-                ? 'reports'
-                : permission === 'productManager'
-                    ? 'inventory'
-                    : undefined
-    if (broadPermission && user.accessLevels?.[broadPermission]) return user.accessLevels[broadPermission] || null
     if (getRolePermissions(user).includes(permission)) return 'edit'
     if (user.visibleMenus?.includes(permission)) return 'view'
 

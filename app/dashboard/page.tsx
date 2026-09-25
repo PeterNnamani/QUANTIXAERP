@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { formatCurrency, formatNumber } from '@/lib/utils'
+import { roleHasPermission } from '@/lib/rbac'
 
 export default function DashboardPage() {
   const { state, user } = useAccounting()
@@ -138,15 +139,30 @@ export default function DashboardPage() {
     return buckets
   }, [selectedRange, todayKey, rangeDays])
 
-  const chartBars = useMemo(
-    () =>
-      chartBuckets.map(({ start, end }) =>
-        state.sales.reduce((sum, sale) => {
-          const saleDate = getDateKey(sale.date)
-          return saleDate >= getDateKey(start) && saleDate <= getDateKey(end) ? sum + sale.totalAmount : sum
-        }, 0)
-      ),
-    [chartBuckets, state.sales]
+  const chartData = useMemo(
+    () => chartBuckets.map(({ start, end }) => {
+      const startKey = getDateKey(start)
+      const endKey = getDateKey(end)
+      const inBucket = (date: string) => {
+        const dateKey = getDateKey(date)
+        return dateKey >= startKey && dateKey <= endKey
+      }
+      const revenue = state.sales.reduce((sum, sale) => inBucket(sale.date) && sale.status !== 'VOID' ? sum + Number(sale.totalAmount || 0) : sum, 0)
+      const expenses = state.expenses.reduce((sum, expense) => inBucket(expense.date) && expense.status !== 'VOID' ? sum + Number(expense.amount || 0) : sum, 0)
+      const purchases = state.purchases.reduce((sum, purchase) => inBucket(purchase.date) && purchase.status !== 'VOID' ? sum + Number(purchase.total || 0) : sum, 0)
+      return { revenue, expenses: expenses + purchases, profit: revenue - expenses - purchases }
+    }),
+    [chartBuckets, state.sales, state.expenses, state.purchases]
+  )
+
+  const chartBars = chartData.map((bucket) => bucket.profit)
+  const chartSummary = chartData.reduce(
+    (totals, bucket) => ({
+      revenue: totals.revenue + bucket.revenue,
+      expenses: totals.expenses + bucket.expenses,
+      profit: totals.profit + bucket.profit,
+    }),
+    { revenue: 0, expenses: 0, profit: 0 }
   )
 
   const chartLabels = useMemo(
@@ -160,7 +176,7 @@ export default function DashboardPage() {
     [chartBuckets, selectedRange]
   )
 
-  const chartMax = Math.max(...chartBars, 1)
+  const chartMax = Math.max(...chartBars.map((value) => Math.abs(value)), 1)
 
   const kpiCards = [
     {
@@ -283,7 +299,14 @@ export default function DashboardPage() {
     ? recentTransactions
     : []
 
-  const quickActions = ['New Sale', 'Expense', 'Customer', 'Supplier', 'Product', 'Payment']
+  const quickActions = [
+    { label: 'New Sale', permission: 'sales' as const },
+    { label: 'Expense', permission: 'expenses' as const },
+    { label: 'Customer', permission: 'customers' as const },
+    { label: 'Supplier', permission: 'suppliers' as const },
+    { label: 'Product', permission: 'productManager' as const },
+    { label: 'Payment', permission: 'bankTxn' as const },
+  ].filter((action) => roleHasPermission(user, action.permission))
   const [isQUANTIXAOpen, setIsQUANTIXAOpen] = useState(false)
   const [orbHovered, setOrbHovered] = useState(false)
   const [voiceActive, setVoiceActive] = useState(false)
@@ -375,22 +398,22 @@ export default function DashboardPage() {
               <div className="financial-performance-summary">
                 <div className="financial-performance-row">
                   <span>Revenue</span>
-                  <strong>{formatCurrency(revenueToday)}</strong>
+                    <strong>{formatCurrency(chartSummary.revenue)}</strong>
                 </div>
                 <div className="financial-performance-row">
                   <span>Expenses</span>
-                  <strong>{formatCurrency(expensesToday)}</strong>
+                  <strong>{formatCurrency(chartSummary.expenses)}</strong>
                 </div>
                 <div className="financial-performance-row">
                   <span>Profit</span>
-                  <strong>{formatCurrency(netProfitToday)}</strong>
+                    <strong>{formatCurrency(chartSummary.profit)}</strong>
                 </div>
               </div>
               <div className="financial-performance-visual">
                 <div className="financial-performance-chart">
                   {chartBars.map((value, index) => (
                     <div key={index} className="financial-performance-bar">
-                      <div className="financial-performance-bar-fill" style={{ height: `${Math.max((value / chartMax) * 100, 12)}%` }} />
+                      <div className="financial-performance-bar-fill" style={{ height: `${Math.max((Math.abs(value) / chartMax) * 100, 12)}%` }} />
                       <span>{chartLabels[index] ?? ''}</span>
                     </div>
                   ))}
@@ -560,7 +583,7 @@ export default function DashboardPage() {
 
         <section className="quick-actions-row">
           {quickActions.map((action) => (
-            <button key={action} type="button" className="quick-action-button">+ {action}</button>
+            <button key={action.label} type="button" className="quick-action-button">+ {action.label}</button>
           ))}
         </section>
       </div>
