@@ -251,12 +251,15 @@ export default function SalesPage() {
     }
 
     const updatedBanks = { ...state.banks }
-    const destination = isCashPayment
+    const postedBankAccount = result.bankAccount as { id: string; name: string; balance: number } | null
+    const destination = postedBankAccount?.name || (isCashPayment
       ? accountOptions.find((account) => account.toLowerCase().includes('cash')) || accountOptions[0] || ''
-      : sale.paymentAccount
+      : sale.paymentAccount)
     const updatedBankAccounts = state.bankAccounts.map((account) => {
-      if (!(isPaidSale || isPartPayment) || account.name !== destination) return account
-      const balance = account.balance + amountPaid
+      if (!(isPaidSale || isPartPayment)) return account
+      const isPostedAccount = postedBankAccount ? account.id === postedBankAccount.id : account.name === destination
+      if (!isPostedAccount) return account
+      const balance = postedBankAccount ? postedBankAccount.balance : account.balance + amountPaid
       updatedBanks[account.name] = balance
       return { ...account, balance }
     })

@@ -102,7 +102,8 @@ export async function POST(request: Request) {
         }
 
         const totalAmount = Number(sale.totalAmount || 0)
-        const amountPaid = sale.paymentStatus === 'PAID' ? totalAmount : Number(sale.amountPaid || 0)
+        const paymentStatus = String(sale.paymentStatus || 'PAID').toUpperCase()
+        const amountPaid = paymentStatus === 'PAID' ? totalAmount : Number(sale.amountPaid || 0)
         const saleRow = {
             company_id: companyId,
             reference: String(sale.id),
@@ -110,7 +111,7 @@ export async function POST(request: Request) {
             customer_id: customer?.id || null,
             payment_method: sale.paymentMethod || 'Transfer',
             payment_account: sale.paymentAccount || null,
-            payment_status: sale.paymentStatus || 'PAID',
+            payment_status: paymentStatus,
             status: sale.status || 'ACTIVE',
             notes: sale.notes || null,
             subtotal: totalAmount,
@@ -135,24 +136,41 @@ export async function POST(request: Request) {
         const { error: itemError } = await supabaseAdmin.from('sale_items').upsert(itemRows)
         if (itemError) throw itemError
 
-        if (String(sale.paymentStatus || '').toUpperCase() === 'PAID') {
+        let postedBankAccount: { id: string; name: string; balance: number } | null = null
+        if ((paymentStatus === 'PAID' || paymentStatus === 'PART PAYMENT') && amountPaid > 0) {
             await ensureSalesPostingAccounts(companyId)
-            const { error: postingError } = await supabaseAdmin.rpc('post_accounting_cash_movement', {
+            const { data: postingData, error: postingError } = await supabaseAdmin.rpc('post_accounting_cash_movement', {
                 p_company_id: companyId,
                 p_source_module: 'SALES_PAYMENT',
                 p_source_id: String(sale.id),
                 p_reference: String(sale.id),
                 p_entry_date: sale.date || new Date().toISOString().slice(0, 10),
                 p_description: `Payment received for sale ${sale.id}`,
-                p_amount: Number(sale.totalAmount || 0),
+                p_amount: amountPaid,
                 p_bank_account_name: sale.paymentAccount || null,
                 p_offset_account_name: 'Sales Revenue',
                 p_direction: 'deposit',
             })
             if (postingError) throw postingError
+
+            const bankAccountId = (postingData as { bank_account_id?: string } | null)?.bank_account_id
+            if (bankAccountId) {
+                const { data: bankAccount, error: bankAccountError } = await supabaseAdmin
+                    .from('bank_accounts')
+                    .select('id,name,balance')
+                    .eq('id', bankAccountId)
+                    .eq('company_id', companyId)
+                    .single()
+                if (bankAccountError) throw bankAccountError
+                postedBankAccount = {
+                    id: bankAccount.id,
+                    name: bankAccount.name,
+                    balance: Number(bankAccount.balance || 0),
+                }
+            }
         }
 
-        if (String(sale.paymentStatus || '').toUpperCase() !== 'PAID') {
+        if (paymentStatus !== 'PAID') {
             const receivableReference = String(sale.id)
             const outstandingAmount = Number(sale.totalAmount || 0)
             if (outstandingAmount > 0) {
@@ -174,7 +192,7 @@ export async function POST(request: Request) {
             }
         }
 
-        return NextResponse.json({ success: true, saleId: storedSale.id })
+        return NextResponse.json({ success: true, saleId: storedSale.id, bankAccount: postedBankAccount })
     } catch (error) {
         return NextResponse.json({ success: false, error: formatErrorMessage(error) }, { status: 400 })
     }

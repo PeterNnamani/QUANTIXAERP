@@ -27,7 +27,11 @@ export default function DashboardPage() {
   const totalPurchases = state.purchases.filter((purchase) => purchase.status !== 'VOID').reduce((sum, purchase) => sum + Number(purchase.total || 0), 0)
   const totalExpenses = state.expenses.filter((expense) => expense.status !== 'VOID').reduce((sum, expense) => sum + Number(expense.amount || 0), 0)
   const profit = totalSales - totalPurchases - totalExpenses
-  const cashAvailable = state.bankAccounts.reduce((sum, account) => sum + Number(account.balance || 0), 0)
+  const cashAvailable = state.bankAccounts.length > 0
+    ? state.bankAccounts
+      .filter((account) => String(account.status || 'active').toLowerCase() === 'active')
+      .reduce((sum, account) => sum + Number(account.balance || 0), 0)
+    : Object.values(state.banks).reduce((sum, balance) => sum + Number(balance || 0), 0)
 
   const dateKeyFromDate = (date: Date) => {
     const year = date.getFullYear()
