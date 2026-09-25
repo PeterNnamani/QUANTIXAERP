@@ -157,18 +157,25 @@ export default function DashboardPage() {
   }, [chartBuckets, state.sales, state.expenses, state.purchases])
 
   const chartValues = chartData.flatMap((bucket) => [bucket.revenue, bucket.expenses, bucket.profit])
-  const chartSummary = chartData.reduce(
-    (totals, bucket) => ({
-      revenue: totals.revenue + bucket.revenue,
-      expenses: totals.expenses + bucket.expenses,
-      profit: totals.profit + bucket.profit,
-    }),
-    { revenue: 0, expenses: 0, profit: 0 }
-  )
+  const chartRange = useMemo(() => ({
+    start: getDateKey(chartBuckets[0]?.start),
+    end: getDateKey(chartBuckets[chartBuckets.length - 1]?.end),
+  }), [chartBuckets])
+
+  const chartSummary = useMemo(() => {
+    const inRange = (date: string) => {
+      const dateKey = getDateKey(date)
+      return dateKey >= chartRange.start && dateKey <= chartRange.end
+    }
+    const revenue = state.sales.reduce((sum, sale) => inRange(sale.date) && sale.status?.toUpperCase() !== 'VOID' ? sum + Number(sale.totalAmount || 0) : sum, 0)
+    const expenses = state.expenses.reduce((sum, expense) => inRange(expense.date) && expense.status?.toUpperCase() !== 'VOID' ? sum + Number(expense.amount || 0) : sum, 0)
+    const purchases = state.purchases.reduce((sum, purchase) => inRange(purchase.date) && purchase.status?.toUpperCase() !== 'VOID' ? sum + Number(purchase.total || 0) : sum, 0)
+    return { revenue, expenses: expenses + purchases, profit: revenue - expenses - purchases }
+  }, [chartRange, state.sales, state.expenses, state.purchases])
 
   const cashflowSummary = useMemo(() => {
-    const rangeStart = getDateKey(chartBuckets[0]?.start)
-    const rangeEnd = getDateKey(chartBuckets[chartBuckets.length - 1]?.end)
+    const rangeStart = chartRange.start
+    const rangeEnd = chartRange.end
     const transactions = state.bankTxns.filter((txn) => {
       const dateKey = getDateKey(txn.date)
       const isTransfer = String(txn.type || '').toUpperCase() === 'TRANSFER'
@@ -194,7 +201,7 @@ export default function DashboardPage() {
       }
     })
     return totals
-  }, [chartBuckets, state.bankTxns, state.sales])
+  }, [chartRange, state.bankTxns, state.sales])
 
   const chartLabels = useMemo(
     () =>

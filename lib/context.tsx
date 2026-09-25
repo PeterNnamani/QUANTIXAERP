@@ -800,9 +800,9 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }, prev.companySettings),
           openingCapital: Number(companyData?.settings?.openingCapital ?? prev.openingCapital),
           roles: Array.isArray(companyData?.settings?.roles) && companyData.settings.roles.length > 0 ? companyData.settings.roles : prev.roles,
-          sales: salesErr ? prev.sales : remoteSales,
-          purchases: purchasesErr ? prev.purchases : remotePurchases,
-          expenses: expensesErr ? prev.expenses : remoteExpenses,
+          sales: salesErr ? [] : remoteSales,
+          purchases: purchasesErr ? [] : remotePurchases,
+          expenses: expensesErr ? [] : remoteExpenses,
           expenseCategories: categoriesErr ? prev.expenseCategories : remoteExpenseCategories,
           inventory: inventoryErr ? prev.inventory : remoteInventory,
           prepayments: prepaymentsErr && prepaymentsErr.code !== 'PGRST205' ? prev.prepayments : remotePrepayments,
@@ -895,7 +895,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             created_at: t.created_at,
           }))
           setState((prev) => ({ ...prev, bankTxns: normalized }))
-        } else if (!txnsErr) {
+        } else {
           setState((prev) => ({ ...prev, bankTxns: [] }))
         }
       } catch (err) {
