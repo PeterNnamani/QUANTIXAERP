@@ -128,6 +128,7 @@ export default function DashboardPage() {
       const bucketEnd = new Date(bucketStart)
       bucketEnd.setDate(startDate.getDate() + Math.floor(((index + 1) * rangeDays) / 7) - 1)
       return { start: bucketStart, end: bucketEnd }
+    })
   }, [selectedRange, todayKey, rangeDays])
 
   const chartData = useMemo(
