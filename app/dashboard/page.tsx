@@ -32,7 +32,11 @@ export default function DashboardPage() {
   const todayKey = now.toISOString().split('T')[0]
   const yesterdayKey = new Date(now.getTime() - 86400000).toISOString().split('T')[0]
 
-  const getDateKey = (value: string | Date) => new Date(value).toISOString().split('T')[0]
+  const getDateKey = (value: string | Date) => {
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10)
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString().split('T')[0]
+  }
 
   const sumByDate = (records: any[], dateField: string, amountField: string, targetDate: string) =>
     records.reduce((sum, record) => {
@@ -139,9 +143,9 @@ export default function DashboardPage() {
         const dateKey = getDateKey(date)
         return dateKey >= startKey && dateKey <= endKey
       }
-      const revenue = state.sales.reduce((sum, sale) => inBucket(sale.date) && sale.status !== 'VOID' ? sum + Number(sale.totalAmount || 0) : sum, 0)
-      const expenses = state.expenses.reduce((sum, expense) => inBucket(expense.date) && expense.status !== 'VOID' ? sum + Number(expense.amount || 0) : sum, 0)
-      const purchases = state.purchases.reduce((sum, purchase) => inBucket(purchase.date) && purchase.status !== 'VOID' ? sum + Number(purchase.total || 0) : sum, 0)
+      const revenue = state.sales.reduce((sum, sale) => inBucket(sale.date) && sale.status?.toUpperCase() !== 'VOID' ? sum + Number(sale.totalAmount || 0) : sum, 0)
+      const expenses = state.expenses.reduce((sum, expense) => inBucket(expense.date) && expense.status?.toUpperCase() !== 'VOID' ? sum + Number(expense.amount || 0) : sum, 0)
+      const purchases = state.purchases.reduce((sum, purchase) => inBucket(purchase.date) && purchase.status?.toUpperCase() !== 'VOID' ? sum + Number(purchase.total || 0) : sum, 0)
       return { revenue, expenses: expenses + purchases, profit: revenue - expenses - purchases }
     }),
     [chartBuckets, state.sales, state.expenses, state.purchases]
@@ -156,6 +160,24 @@ export default function DashboardPage() {
     }),
     { revenue: 0, expenses: 0, profit: 0 }
   )
+
+  const cashflowSummary = useMemo(() => {
+    const rangeStart = getDateKey(chartBuckets[0]?.start)
+    const rangeEnd = getDateKey(chartBuckets[chartBuckets.length - 1]?.end)
+    return state.bankTxns.reduce(
+      (totals, txn) => {
+        const dateKey = getDateKey(txn.date)
+        const isTransfer = String(txn.type || '').toUpperCase() === 'TRANSFER'
+          || String(txn.activity || '').toLowerCase().includes('inter-bank transfer')
+        const amount = Number(txn.amount || 0)
+        if (!dateKey || dateKey < rangeStart || dateKey > rangeEnd || txn.status?.toUpperCase() === 'VOID' || isTransfer) return totals
+        if (amount > 0) totals.moneyIn += amount
+        if (amount < 0) totals.moneyOut += Math.abs(amount)
+        return totals
+      },
+      { moneyIn: 0, moneyOut: 0 }
+    )
+  }, [chartBuckets, state.bankTxns])
 
   const chartLabels = useMemo(
     () =>
@@ -329,8 +351,8 @@ export default function DashboardPage() {
     total: '₦7,000,000',
   }
 
-  const cashIn = chartSummary.revenue
-  const cashOut = chartSummary.expenses
+  const cashIn = cashflowSummary.moneyIn
+  const cashOut = cashflowSummary.moneyOut
   const cashNet = cashIn - cashOut
 
   const healthChecks = [
@@ -404,7 +426,12 @@ export default function DashboardPage() {
               <div className="financial-performance-visual">
                 <div className="financial-performance-chart">
                   {chartData.map((bucket, index) => (
-                    <div key={index} className="financial-performance-bar">
+                    <div
+                      key={index}
+                      className="financial-performance-bar"
+                      title={`${getDateKey(chartBuckets[index].start)} to ${getDateKey(chartBuckets[index].end)}: Revenue ${formatCurrency(bucket.revenue)}, Expenses ${formatCurrency(bucket.expenses)}, Profit ${formatCurrency(bucket.profit)}`}
+                      aria-label={`${chartLabels[index] ?? ''}: Revenue ${formatCurrency(bucket.revenue)}, Expenses ${formatCurrency(bucket.expenses)}, Profit ${formatCurrency(bucket.profit)}`}
+                    >
                       <div className="financial-performance-bar-group">
                         {[
                           { value: bucket.revenue, className: 'revenue' },
@@ -414,7 +441,7 @@ export default function DashboardPage() {
                           <div
                             key={bar.className}
                             className={`financial-performance-bar-fill ${bar.className}`}
-                            style={{ height: `${Math.max((Math.abs(bar.value) / chartMax) * 100, bar.value === 0 ? 2 : 4)}%` }}
+                            style={{ height: `${bar.value === 0 ? 0 : Math.max((Math.abs(bar.value) / chartMax) * 100, 1)}%` }}
                             title={`${bar.className}: ${formatCurrency(bar.value)}`}
                           />
                         ))}
