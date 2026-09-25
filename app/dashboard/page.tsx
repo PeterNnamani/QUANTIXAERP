@@ -328,8 +328,8 @@ export default function DashboardPage() {
     total: '₦7,000,000',
   }
 
-  const cashIn = revenueToday > 0 ? revenueToday : 0
-  const cashOut = expensesToday > 0 ? expensesToday : 0
+  const cashIn = chartSummary.revenue
+  const cashOut = chartSummary.expenses
   const cashNet = cashIn - cashOut
 
   const healthChecks = [
