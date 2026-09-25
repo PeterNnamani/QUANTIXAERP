@@ -29,18 +29,25 @@ export default function DashboardPage() {
   const profit = totalSales - totalPurchases - totalExpenses
   const cashAvailable = state.bankAccounts.reduce((sum, account) => sum + Number(account.balance || 0), 0)
 
-  const todayKey = now.toISOString().split('T')[0]
-  const yesterdayKey = new Date(now.getTime() - 86400000).toISOString().split('T')[0]
+  const dateKeyFromDate = (date: Date) => {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
+  const todayKey = dateKeyFromDate(now)
+  const yesterdayKey = dateKeyFromDate(new Date(now.getTime() - 86400000))
 
   const getDateKey = (value: string | Date) => {
     if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10)
     const date = new Date(value)
-    return Number.isNaN(date.getTime()) ? '' : date.toISOString().split('T')[0]
+    return Number.isNaN(date.getTime()) ? '' : dateKeyFromDate(date)
   }
 
   const sumByDate = (records: any[], dateField: string, amountField: string, targetDate: string) =>
     records.reduce((sum, record) => {
-      return getDateKey(record[dateField]) === targetDate ? sum + (record[amountField] || 0) : sum
+      return getDateKey(record[dateField]) === targetDate ? sum + Number(record[amountField] || 0) : sum
     }, 0)
 
   const revenueToday = sumByDate(state.sales, 'date', 'totalAmount', todayKey)
@@ -88,7 +95,7 @@ export default function DashboardPage() {
 
   const last7Dates = useMemo(() => {
     const dates: string[] = []
-    const base = new Date(todayKey)
+    const base = new Date(`${todayKey}T00:00:00`)
     for (let i = 6; i >= 0; i -= 1) {
       const date = new Date(base)
       date.setDate(base.getDate() - i)
@@ -123,7 +130,7 @@ export default function DashboardPage() {
   const rangeDays = rangeDaysMap[selectedRange]
 
   const chartBuckets = useMemo(() => {
-    const endDate = new Date(todayKey)
+    const endDate = new Date(`${todayKey}T00:00:00`)
     const startDate = new Date(endDate)
     startDate.setDate(endDate.getDate() - rangeDays + 1)
     return Array.from({ length: 7 }, (_, index) => {
@@ -135,21 +142,19 @@ export default function DashboardPage() {
     })
   }, [selectedRange, todayKey, rangeDays])
 
-  const chartData = useMemo(
-    () => chartBuckets.map(({ start, end }) => {
-      const startKey = getDateKey(start)
-      const endKey = getDateKey(end)
-      const inBucket = (date: string) => {
-        const dateKey = getDateKey(date)
-        return dateKey >= startKey && dateKey <= endKey
-      }
-      const revenue = state.sales.reduce((sum, sale) => inBucket(sale.date) && sale.status?.toUpperCase() !== 'VOID' ? sum + Number(sale.totalAmount || 0) : sum, 0)
-      const expenses = state.expenses.reduce((sum, expense) => inBucket(expense.date) && expense.status?.toUpperCase() !== 'VOID' ? sum + Number(expense.amount || 0) : sum, 0)
-      const purchases = state.purchases.reduce((sum, purchase) => inBucket(purchase.date) && purchase.status?.toUpperCase() !== 'VOID' ? sum + Number(purchase.total || 0) : sum, 0)
+  const chartData = useMemo(() => {
+    const inRange = (date: string, start: Date, end: Date) => {
+      const dateKey = getDateKey(date)
+      return dateKey >= getDateKey(start) && dateKey <= getDateKey(end)
+    }
+
+    return chartBuckets.map(({ start, end }) => {
+      const revenue = state.sales.reduce((sum, sale) => inRange(sale.date, start, end) && sale.status?.toUpperCase() !== 'VOID' ? sum + Number(sale.totalAmount || 0) : sum, 0)
+      const expenses = state.expenses.reduce((sum, expense) => inRange(expense.date, start, end) && expense.status?.toUpperCase() !== 'VOID' ? sum + Number(expense.amount || 0) : sum, 0)
+      const purchases = state.purchases.reduce((sum, purchase) => inRange(purchase.date, start, end) && purchase.status?.toUpperCase() !== 'VOID' ? sum + Number(purchase.total || 0) : sum, 0)
       return { revenue, expenses: expenses + purchases, profit: revenue - expenses - purchases }
-    }),
-    [chartBuckets, state.sales, state.expenses, state.purchases]
-  )
+    })
+  }, [chartBuckets, state.sales, state.expenses, state.purchases])
 
   const chartValues = chartData.flatMap((bucket) => [bucket.revenue, bucket.expenses, bucket.profit])
   const chartSummary = chartData.reduce(
@@ -164,20 +169,32 @@ export default function DashboardPage() {
   const cashflowSummary = useMemo(() => {
     const rangeStart = getDateKey(chartBuckets[0]?.start)
     const rangeEnd = getDateKey(chartBuckets[chartBuckets.length - 1]?.end)
-    return state.bankTxns.reduce(
-      (totals, txn) => {
-        const dateKey = getDateKey(txn.date)
-        const isTransfer = String(txn.type || '').toUpperCase() === 'TRANSFER'
-          || String(txn.activity || '').toLowerCase().includes('inter-bank transfer')
+    const transactions = state.bankTxns.filter((txn) => {
+      const dateKey = getDateKey(txn.date)
+      const isTransfer = String(txn.type || '').toUpperCase() === 'TRANSFER'
+        || String(txn.activity || '').toLowerCase().includes('inter-bank transfer')
+      return dateKey && dateKey >= rangeStart && dateKey <= rangeEnd && txn.status?.toUpperCase() !== 'VOID' && !isTransfer
+    })
+    const totals = transactions.reduce(
+      (result, txn) => {
         const amount = Number(txn.amount || 0)
-        if (!dateKey || dateKey < rangeStart || dateKey > rangeEnd || txn.status?.toUpperCase() === 'VOID' || isTransfer) return totals
-        if (amount > 0) totals.moneyIn += amount
-        if (amount < 0) totals.moneyOut += Math.abs(amount)
-        return totals
+        if (amount > 0) result.moneyIn += amount
+        if (amount < 0) result.moneyOut += Math.abs(amount)
+        return result
       },
       { moneyIn: 0, moneyOut: 0 }
     )
-  }, [chartBuckets, state.bankTxns])
+
+    const transactionText = transactions.map((txn) => `${txn.name || ''} ${txn.activity || ''} ${txn.description || ''}`.toLowerCase()).join(' ')
+    state.sales.forEach((sale) => {
+      const dateKey = getDateKey(sale.date)
+      const saleId = String(sale.id || '').toLowerCase()
+      if (dateKey >= rangeStart && dateKey <= rangeEnd && sale.status?.toUpperCase() !== 'VOID' && sale.paymentStatus?.toUpperCase() === 'PAID' && saleId && !transactionText.includes(saleId)) {
+        totals.moneyIn += Number(sale.totalAmount || 0)
+      }
+    })
+    return totals
+  }, [chartBuckets, state.bankTxns, state.sales])
 
   const chartLabels = useMemo(
     () =>
