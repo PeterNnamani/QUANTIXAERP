@@ -155,7 +155,7 @@ export default function DashboardPage() {
     [chartBuckets, state.sales, state.expenses, state.purchases]
   )
 
-  const chartBars = chartData.map((bucket) => bucket.profit)
+  const chartValues = chartData.flatMap((bucket) => [bucket.revenue, bucket.expenses, bucket.profit])
   const chartSummary = chartData.reduce(
     (totals, bucket) => ({
       revenue: totals.revenue + bucket.revenue,
@@ -176,7 +176,7 @@ export default function DashboardPage() {
     [chartBuckets, selectedRange]
   )
 
-  const chartMax = Math.max(...chartBars.map((value) => Math.abs(value)), 1)
+  const chartMax = Math.max(...chartValues.map((value) => Math.abs(value)), 1)
 
   const kpiCards = [
     {
@@ -411,9 +411,22 @@ export default function DashboardPage() {
               </div>
               <div className="financial-performance-visual">
                 <div className="financial-performance-chart">
-                  {chartBars.map((value, index) => (
+                  {chartData.map((bucket, index) => (
                     <div key={index} className="financial-performance-bar">
-                      <div className="financial-performance-bar-fill" style={{ height: `${Math.max((Math.abs(value) / chartMax) * 100, 12)}%` }} />
+                      <div className="financial-performance-bar-group">
+                        {[
+                          { value: bucket.revenue, className: 'revenue' },
+                          { value: bucket.expenses, className: 'expenses' },
+                          { value: bucket.profit, className: 'profit' },
+                        ].map((bar) => (
+                          <div
+                            key={bar.className}
+                            className={`financial-performance-bar-fill ${bar.className}`}
+                            style={{ height: `${Math.max((Math.abs(bar.value) / chartMax) * 100, 12)}%` }}
+                            title={`${bar.className}: ${formatCurrency(bar.value)}`}
+                          />
+                        ))}
+                      </div>
                       <span>{chartLabels[index] ?? ''}</span>
                     </div>
                   ))}
