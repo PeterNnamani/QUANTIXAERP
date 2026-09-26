@@ -64,6 +64,8 @@ import { setExportCompanyName } from '@/lib/export-utils'
 import { wipedCompanyBooks } from '@/lib/company-lifecycle'
 import { mergeReceivablesFromSales } from '@/lib/receivables'
 import { bankTxnKey, businessReference, isUuid, isoDate, selectUnpostedJournals, shouldPostExpenseCash, subledgerReference } from '@/lib/accounting/sync'
+import { dedupeBankAccounts, mergeLoadedBankAccounts, planBankWrites, planProductWrites } from '@/lib/record-upsert'
+import { capitalOpeningAmount, normalizeOpeningDate, persistChartOpeningBalances, reconcileCapitalOpening } from '@/lib/accounting/opening-balances'
 
 export interface User {
   companyId?: string
@@ -413,6 +415,7 @@ export interface AccountingContextType {
   subscriptionLoaded: boolean
   state: AppState
   updateState: (updates: Partial<AppState>, options?: { persist?: boolean }) => void
+  saveOpeningBalances: (accounts: LedgerAccount[]) => Promise<{ persisted: boolean }>
   resetCompanyBooks: () => void
   deleteInventoryItems: (skus: string[]) => Promise<void>
   login: (userData: User, remember: boolean) => void
@@ -886,14 +889,25 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             ? normalizeRemotePrepayments(prepaymentsData)
             : []
         const { supplierList, customerList } = normalizeRemoteContacts(contactsData || [])
+        const mappedChart = accountsErr ? null : dedupeChartOfAccounts((accountsData || []).map((account: any) => ({
+          id: account.id, code: account.code, name: account.name, accountType: account.account_type,
+          accountSubType: account.account_subtype, normalBalance: account.normal_balance,
+          isControlAccount: account.is_control_account, isActive: account.is_active, currency: account.currency,
+          openingBalance: Number(account.opening_balance || 0), openingBalanceDate: account.opening_balance_date,
+        })))
 
-        setState((prev) => ({
+        setState((prev) => {
+          const remoteOpeningCapital = Number(companyData?.settings?.openingCapital ?? prev.openingCapital)
+          const loadedChart = mappedChart ? reconcileCapitalOpening(mappedChart, remoteOpeningCapital) : null
+          const openingCapital = loadedChart ? capitalOpeningAmount(loadedChart) || remoteOpeningCapital : remoteOpeningCapital
+          return {
           ...prev,
           companySettings: normalizeCompanySettings({
             ...(companyData?.settings || {}),
             companyName: companyData?.name || prev.companySettings.companyName || user.companyName || '',
+            openingCapital,
           }, prev.companySettings),
-          openingCapital: Number(companyData?.settings?.openingCapital ?? prev.openingCapital),
+          openingCapital,
           roles: Array.isArray(companyData?.settings?.roles) && companyData.settings.roles.length > 0 ? companyData.settings.roles : prev.roles,
           sales: mergeRemoteRecords(remoteSales, prev.sales, Boolean(salesErr)),
           purchases: mergeRemoteRecords(remotePurchases, prev.purchases, Boolean(purchasesErr)),
@@ -907,12 +921,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           loanRepayments: loanRepaymentsErr ? prev.loanRepayments : normalizeRemoteLoanRepayments(loanRepaymentsData || []),
           receivables: mergeRemoteRecords(remoteReceivables, prev.receivables, Boolean(receivablesErr), 'local'),
           payables: mergeRemoteRecords(payablesErr ? [] : normalizeRemotePayables(payablesData || []), prev.payables, Boolean(payablesErr), 'local'),
-          chartOfAccounts: accountsErr ? prev.chartOfAccounts : dedupeChartOfAccounts((accountsData || []).map((account: any) => ({
-            id: account.id, code: account.code, name: account.name, accountType: account.account_type,
-            accountSubType: account.account_subtype, normalBalance: account.normal_balance,
-            isControlAccount: account.is_control_account, isActive: account.is_active, currency: account.currency,
-            openingBalance: Number(account.opening_balance || 0), openingBalanceDate: account.opening_balance_date,
-          }))),
+          chartOfAccounts: loadedChart || prev.chartOfAccounts,
           journalEntries: entriesErr ? prev.journalEntries : (entriesData || []).map((entry: any) => ({
             id: entry.id, entryDate: isoDate(entry.entry_date), periodId: entry.period_id, reference: entry.reference || '',
             description: entry.description || '', sourceModule: entry.source_module, sourceId: entry.source_id,
@@ -923,7 +932,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             credit: Number(line.credit || 0), description: line.description || '',
           })),
           auditLogs: mergeRemoteRecords(auditLogsErr ? [] : normalizeRemoteAuditLogs(auditLogsData || []), prev.auditLogs, Boolean(auditLogsErr)),
-        }))
+          }
+        })
 
         if (companyData?.name && user.companyName !== companyData.name) {
           setUser((current) => current ? { ...current, companyName: companyData.name } : current)
@@ -972,15 +982,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             }
           })
           setState((prev) => {
-            const localById = new Map(prev.bankAccounts.filter((account) => account.id).map((account) => [account.id, account]))
-            const remoteIds = new Set(bankAccounts.map((account) => account.id))
-            const mergedAccounts = [
-              ...prev.bankAccounts.filter((account) => account.id && !remoteIds.has(account.id)),
-              ...bankAccounts.map((account) => {
-                const local = localById.get(account.id)
-                return local ? { ...account, balance: Number(local.balance ?? account.balance) } : account
-              }),
-            ]
+            const mergedAccounts = mergeLoadedBankAccounts(prev.bankAccounts, bankAccounts)
             const banks = { ...prev.banks }
             mergedAccounts.forEach((account) => { banks[account.name] = Number(account.balance || 0) })
             return { ...prev, banks, bankAccounts: mergedAccounts }
@@ -1013,12 +1015,18 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    loadRemoteData().finally(() => {
+    const markReady = () => {
       if (mounted) setSubscriptionLoaded(true)
+    }
+    const readyTimer = setTimeout(markReady, 15000)
+    loadRemoteData().finally(() => {
+      clearTimeout(readyTimer)
+      markReady()
     })
 
     return () => {
       mounted = false
+      clearTimeout(readyTimer)
       if (trialExpiryTimer.current) clearTimeout(trialExpiryTimer.current)
     }
   }, [user?.companyId])
@@ -1035,46 +1043,53 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
   // Load from localStorage or sessionStorage on mount
   useEffect(() => {
-    const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
-    let companyId = user?.companyId
+    try {
+      const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
+      let companyId = user?.companyId
 
-    if (savedUser) {
-      try {
+      if (savedUser) {
         const parsed = JSON.parse(savedUser)
         const enriched = enrichStoredUser(parsed)
         companyId = enriched.companyId || companyId
         setUser(enriched)
-        // persist back the enriched user so other sessions/readers get visibleMenus
         const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
         storage.setItem(AUTH_KEY, JSON.stringify(enriched))
-      } catch (e) {
-        setUser(JSON.parse(savedUser))
       }
+      const savedState = companyId
+        ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
+        : null
+      if (savedState) {
+        const parsedState = JSON.parse(savedState)
+        const openingCapital = Number(parsedState.openingCapital ?? parsedState.companySettings?.openingCapital ?? 0)
+        const chartOfAccounts = reconcileCapitalOpening(Array.isArray(parsedState.chartOfAccounts) ? parsedState.chartOfAccounts : [], openingCapital)
+        const reconciledCapital = capitalOpeningAmount(chartOfAccounts) || openingCapital
+        setState({
+          ...defaultState,
+          ...parsedState,
+          openingCapital: reconciledCapital,
+          chartOfAccounts,
+          companySettings: normalizeCompanySettings({ ...parsedState.companySettings, openingCapital: reconciledCapital }, defaultState.companySettings),
+          expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
+          inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
+          roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
+          staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
+        })
+      }
+    } catch (error) {
+      console.error('Unable to restore the saved session', error)
+    } finally {
+      setIsLoading(false)
     }
-    const savedState = companyId
-      ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
-      : null
-    if (savedState) {
-      const parsedState = JSON.parse(savedState)
-      setState({
-        ...defaultState,
-        ...parsedState,
-        companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
-        expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
-        inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
-        roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
-        staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
-      })
-    }
-    setIsLoading(false)
   }, [user?.companyId])
 
   const updateState = (updates: Partial<AppState>, options: { persist?: boolean } = {}) => {
     const companyId = user?.companyId
     setState((prev) => {
-      const normalizedUpdates = updates.inventory
-        ? { ...updates, inventory: normalizeInventorySkus(updates.inventory) }
-        : updates
+      const normalizedUpdates = {
+        ...updates,
+        ...(updates.inventory ? { inventory: normalizeInventorySkus(updates.inventory) } : {}),
+        ...(updates.bankAccounts ? { bankAccounts: dedupeBankAccounts(updates.bankAccounts) } : {}),
+      }
       const newState = { ...prev, ...normalizedUpdates }
       if (companyId) {
         localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(newState))
@@ -1276,7 +1291,15 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.inventory) {
-            const inventoryRows = (normalizedUpdates.inventory as InventoryItem[]).map((item) => ({
+            const { data: existingProducts, error: existingProductsErr } = await supabase.from('products').select('id,sku,name').eq('company_id', companyId)
+            if (existingProductsErr) throw existingProductsErr
+            const productWrites = planProductWrites(existingProducts || [], normalizedUpdates.inventory as InventoryItem[])
+            for (const write of productWrites) {
+              if (!write.renameFromId || !write.item.sku) continue
+              const { error: renameErr } = await supabase.from('products').update({ sku: write.item.sku, updated_at: new Date().toISOString() }).eq('id', write.renameFromId).eq('company_id', companyId)
+              if (renameErr) throw renameErr
+            }
+            const inventoryRows = productWrites.map(({ item }) => ({
               company_id: companyId,
               sku: item.sku,
               name: item.product,
@@ -1405,8 +1428,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               is_control_account: account.isControlAccount || false,
               is_active: account.isActive !== false,
               currency: account.currency || 'NGN',
-              opening_balance: account.openingBalance || 0,
-              opening_balance_date: account.openingBalanceDate || null,
+              opening_balance: Number(account.openingBalance || 0),
+              opening_balance_date: normalizeOpeningDate(account.openingBalanceDate),
               updated_at: new Date().toISOString(),
             }))
             if (accountRows.length > 0) {
@@ -1534,7 +1557,10 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.bankAccounts) {
-            const bankRows = (normalizedUpdates.bankAccounts as BankAccount[]).map((account) => ({
+            const { data: existingBanks, error: existingBanksErr } = await supabase.from('bank_accounts').select('id,name').eq('company_id', companyId)
+            if (existingBanksErr) throw existingBanksErr
+            const plannedBanks = planBankWrites(existingBanks || [], normalizedUpdates.bankAccounts as BankAccount[])
+            const bankRows = plannedBanks.accounts.map((account) => ({
               id: account.id,
               company_id: companyId,
               name: account.name,
@@ -1546,11 +1572,22 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               opening_balance: account.openingBalance,
               opening_balance_date: account.openingBalanceDate || null,
               balance: account.balance,
-              status: account.status.toLowerCase(),
+              status: String(account.status || 'active').toLowerCase(),
               updated_at: new Date().toISOString(),
             }))
             const { error: bankAccountsPersistErr } = await supabase.from('bank_accounts').upsert(bankRows, { onConflict: 'id' })
             if (bankAccountsPersistErr) throw bankAccountsPersistErr
+            const bankIdMap = plannedBanks.idMap as Record<string, string>
+            if (Object.keys(bankIdMap).length > 0) {
+              setState((current) => {
+                const nextAccounts = dedupeBankAccounts(current.bankAccounts.map((account) => (
+                  bankIdMap[account.id] ? { ...account, id: bankIdMap[account.id] } : account
+                )))
+                const next = { ...current, bankAccounts: nextAccounts }
+                localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(next))
+                return next
+              })
+            }
           }
 
           if (normalizedUpdates.bankTxns) {
@@ -1738,11 +1775,28 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const saveOpeningBalances = async (accounts: LedgerAccount[]) => {
+    const openingCapital = capitalOpeningAmount(accounts)
+    let savedAccounts = accounts
+    let persisted = false
+    if (supabase && user?.companyId) {
+      savedAccounts = await persistChartOpeningBalances(supabase, user.companyId, accounts)
+      persisted = true
+    }
+    updateState({
+      chartOfAccounts: savedAccounts,
+      openingCapital,
+      companySettings: { ...state.companySettings, openingCapital },
+    })
+    return { persisted }
+  }
+
   const value: AccountingContextType = {
     user,
     subscriptionLoaded,
     state,
     updateState,
+    saveOpeningBalances,
     resetCompanyBooks,
     deleteInventoryItems,
     login,

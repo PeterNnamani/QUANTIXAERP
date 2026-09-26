@@ -8,6 +8,7 @@ import { formatCurrency, formatNumber, parseNumeric } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
 import { parseExcelFile } from '@/lib/import-utils'
 import { generateSku } from '@/lib/sku'
+import { replaceInventoryItem } from '@/lib/record-upsert'
 import InventorySheetTable, { inventorySheetHeaders, type InventorySheet } from '@/components/inventory/inventory-sheet-table'
 
 export default function ProductManagerPage() {
@@ -23,7 +24,7 @@ export default function ProductManagerPage() {
     const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
     const [importFileName, setImportFileName] = useState('')
     const [importError, setImportError] = useState('')
-    const [productFormData, setProductFormData] = useState({
+    const emptyProductForm = {
         name: '',
         sku: '',
         description: '',
@@ -35,7 +36,9 @@ export default function ProductManagerPage() {
         stock: 0,
         expiryDate: '',
         damagedExpired: 0,
-    })
+    }
+    const [productFormData, setProductFormData] = useState(emptyProductForm)
+    const [editingProduct, setEditingProduct] = useState<{ sku: string; product: string } | null>(null)
 
     const products = useMemo(() => {
         const usedSkus = state.inventory.map((item) => item.sku).filter((sku): sku is string => Boolean(sku))
@@ -50,7 +53,7 @@ export default function ProductManagerPage() {
                 description: item.description || '',
                 branch: item.branch || '',
                 category: item.dept || 'Uncategorized',
-                brand: '—',
+                brand: item.brand || '—',
                 costPrice: item.unitCost,
                 sellingPrice: item.sellingPrice ?? item.unitCost,
                 stockStatus: item.closing <= 0 ? 'Out of Stock' : item.closing <= 10 ? 'Low Stock' : 'In Stock',
@@ -84,19 +87,48 @@ export default function ProductManagerPage() {
         { label: 'Variants', value: formatNumber(products.length), tone: 'info' },
     ]
 
+    const resetProductForm = () => {
+        setEditingProduct(null)
+        setProductFormData(emptyProductForm)
+    }
+
+    const openProductForm = (product?: { name: string; sku: string; description: string; branch: string; category: string; brand: string; costPrice: number; sellingPrice: number; stock: number; expiryDate: string; damagedExpired: number }) => {
+        if (!product) {
+            resetProductForm()
+            setShowProductForm(true)
+            return
+        }
+        setEditingProduct({ sku: product.sku, product: product.name })
+        setProductFormData({
+            name: product.name,
+            sku: product.sku,
+            description: product.description,
+            branch: product.branch,
+            category: product.category === 'Uncategorized' ? '' : product.category,
+            brand: product.brand === '—' ? '' : product.brand,
+            costPrice: product.costPrice,
+            sellingPrice: product.sellingPrice,
+            stock: product.stock,
+            expiryDate: product.expiryDate,
+            damagedExpired: product.damagedExpired,
+        })
+        setShowProductForm(true)
+    }
+
     const handleSaveProduct = () => {
         if (!productFormData.name) {
             alert('Product name is required.')
             return
         }
 
-        const sku = productFormData.sku.trim() || generateSku(productFormData.name, state.inventory.map((item) => item.sku || ''))
+        const sku = productFormData.sku.trim() || editingProduct?.sku || generateSku(productFormData.name, state.inventory.map((item) => item.sku || ''))
 
         const newInventoryItem = {
             product: productFormData.name,
             sku,
             description: productFormData.description,
             branch: productFormData.branch,
+            brand: productFormData.brand,
             dept: productFormData.category || 'Uncategorized',
             openQty: productFormData.stock,
             purchased: 0,
@@ -108,22 +140,11 @@ export default function ProductManagerPage() {
             damagedExpired: productFormData.damagedExpired,
         }
 
-        updateState({ inventory: [...state.inventory, newInventoryItem] })
-        addAuditLog('CREATE', 'PRODUCT', sku, `Product ${productFormData.name} added to catalog.`)
+        const saved = replaceInventoryItem(state.inventory, newInventoryItem, editingProduct)
+        updateState({ inventory: saved.inventory })
+        addAuditLog(saved.updated ? 'UPDATE' : 'CREATE', 'PRODUCT', sku, saved.updated ? `Product ${productFormData.name} updated.` : `Product ${productFormData.name} added to catalog.`)
         setShowProductForm(false)
-        setProductFormData({
-            name: '',
-            sku: '',
-            description: '',
-            branch: '',
-            category: '',
-            brand: '',
-            costPrice: 0,
-            sellingPrice: 0,
-            stock: 0,
-            expiryDate: '',
-            damagedExpired: 0,
-        })
+        resetProductForm()
     }
 
     const handleImportProducts = () => {
@@ -277,7 +298,7 @@ export default function ProductManagerPage() {
                     </div>
                     <div className="product-manager-actions">
                         <BulkImport label="Bulk upload" tableColumns={inventorySheetHeaders[selectedSheet]} />
-                        <button className="product-manager-btn secondary" type="button" onClick={() => setShowProductForm(true)}>+ Add Product</button>
+                        <button className="product-manager-btn secondary" type="button" onClick={() => openProductForm()}>+ Add Product</button>
                         <button className="product-manager-btn secondary" type="button" onClick={handleImportProducts}>Import Products</button>
                         <button className="product-manager-btn secondary allow-readonly" type="button" onClick={handleExportProducts}>Export Products</button>
                         <button className="product-manager-btn secondary" type="button" onClick={() => setShowFilters((prev) => !prev)}>{showFilters ? 'Hide Filters' : 'Show Filters'}</button>
@@ -298,10 +319,10 @@ export default function ProductManagerPage() {
                     <div className="product-manager-card">
                         <div className="section-head">
                             <div>
-                                <div className="card-title">Add New Product</div>
-                                <div className="section-subtitle">Create a new item and add it to inventory.</div>
+                                <div className="card-title">{editingProduct ? 'Edit Product' : 'Add New Product'}</div>
+                                <div className="section-subtitle">{editingProduct ? 'Save changes on this product.' : 'Create a new item and add it to inventory.'}</div>
                             </div>
-                            <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowProductForm(false)}>Close</button>
+                            <button className="btn btn-secondary btn-sm" type="button" onClick={() => { setShowProductForm(false); resetProductForm() }}>Close</button>
                         </div>
                         <div className="form-grid" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px' }}>
                             <div className="fg">
@@ -350,8 +371,8 @@ export default function ProductManagerPage() {
                             </div>
                         </div>
                         <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
-                            <button className="btn btn-primary" type="button" onClick={handleSaveProduct}>Save Product</button>
-                            <button className="btn btn-secondary" type="button" onClick={() => setShowProductForm(false)}>Cancel</button>
+                            <button className="btn btn-primary" type="button" onClick={handleSaveProduct}>{editingProduct ? 'Save changes' : 'Save Product'}</button>
+                            <button className="btn btn-secondary" type="button" onClick={() => { setShowProductForm(false); resetProductForm() }}>Cancel</button>
                         </div>
                     </div>
                 )}
@@ -483,6 +504,7 @@ export default function ProductManagerPage() {
                                     <div className="card-title">Product Details</div>
                                     <div className="section-subtitle">Catalog information for the selected item.</div>
                                 </div>
+                                {selectedProduct && <button className="btn btn-secondary btn-sm" type="button" onClick={() => openProductForm(selectedProduct)}>Edit</button>}
                             </div>
                             <div className="product-manager-detail-panel">
                                 <div className="product-manager-detail-row"><span>Product Name</span><strong>{selectedProduct?.name || 'Not selected'}</strong></div>
@@ -490,7 +512,7 @@ export default function ProductManagerPage() {
                                 <div className="product-manager-detail-row"><span>SKU</span><strong>{selectedProduct?.sku || '—'}</strong></div>
                                 <div className="product-manager-detail-row"><span>Category</span><strong>{selectedProduct?.category || '—'}</strong></div>
                                 <div className="product-manager-detail-row"><span>Branch</span><strong>{selectedProduct?.branch || '—'}</strong></div>
-                                <div className="product-manager-detail-row"><span>Brand</span><strong>—</strong></div>
+                                <div className="product-manager-detail-row"><span>Brand</span><strong>{selectedProduct?.brand || '—'}</strong></div>
                                 <div className="product-manager-detail-row"><span>Cost Price</span><strong>{selectedProduct?.costPrice ? formatCurrency(selectedProduct.costPrice) : formatCurrency(0)}</strong></div>
                                 <div className="product-manager-detail-row"><span>Selling Price</span><strong>{selectedProduct?.sellingPrice ? formatCurrency(selectedProduct.sellingPrice) : formatCurrency(0)}</strong></div>
                             </div>

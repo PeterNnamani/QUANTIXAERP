@@ -49,39 +49,42 @@ export default function LoginPage() {
       }
     }
 
-    const matchedStaff = findStaffMemberByLogin(state.staffMembers, normalizedUsername, normalizedPin)
-    const databaseUser = await findUserInDatabase(normalizedUsername, normalizedPin, state.roles)
+    try {
+      const matchedStaff = findStaffMemberByLogin(state.staffMembers, normalizedUsername, normalizedPin)
+      const databaseUser = await findUserInDatabase(normalizedUsername, normalizedPin, state.roles)
 
-    // Validate credentials against database or staff members
-    const localAccess = matchedStaff ? savedMenuAccess({ ...matchedStaff, role: matchedStaff.roleId }) : null
-    const databaseAccess = databaseUser && databaseUser.accessLevels !== undefined
-        ? savedMenuAccess({ accessLevels: databaseUser.accessLevels, role: databaseUser.role })
-        : null
-    const menuAccess = localAccess || databaseAccess
+      const localAccess = matchedStaff ? savedMenuAccess({ ...matchedStaff, role: matchedStaff.roleId }) : null
+      const databaseAccess = databaseUser && databaseUser.accessLevels !== undefined
+          ? savedMenuAccess({ accessLevels: databaseUser.accessLevels, role: databaseUser.role })
+          : null
+      const menuAccess = localAccess || databaseAccess
 
-    if (databaseUser) {
-      await recordUserLogin(databaseUser)
-      saveRememberedUsername(rememberMe)
-      login(menuAccess ? { ...databaseUser, ...menuAccess } : databaseUser, rememberMe)
-      setIsLoading(false)
-      router.push('/dashboard')
-    } else if (matchedStaff) {
-      saveRememberedUsername(rememberMe)
-      login({
-        name: matchedStaff.name,
-        role: matchedStaff.roleId,
-        roleId: matchedStaff.roleId,
-        roleName: matchedStaff.roleName,
-        staffId: matchedStaff.staffId,
-        permissions: menuAccess?.permissions || matchedStaff.permissions,
-        visibleMenus: menuAccess?.visibleMenus || matchedStaff.visibleMenus,
-        accessLevels: menuAccess?.accessLevels || matchedStaff.accessLevels,
-        dataScope: matchedStaff.dataScope,
-      }, rememberMe)
-      setIsLoading(false)
-      router.push('/dashboard')
-    } else {
-      setError('Invalid username or password')
+      if (databaseUser) {
+        void recordUserLogin(databaseUser)
+        saveRememberedUsername(rememberMe)
+        login(menuAccess ? { ...databaseUser, ...menuAccess } : databaseUser, rememberMe)
+        router.push('/dashboard')
+      } else if (matchedStaff) {
+        saveRememberedUsername(rememberMe)
+        login({
+          name: matchedStaff.name,
+          role: matchedStaff.roleId,
+          roleId: matchedStaff.roleId,
+          roleName: matchedStaff.roleName,
+          staffId: matchedStaff.staffId,
+          permissions: menuAccess?.permissions || matchedStaff.permissions,
+          visibleMenus: menuAccess?.visibleMenus || matchedStaff.visibleMenus,
+          accessLevels: menuAccess?.accessLevels || matchedStaff.accessLevels,
+          dataScope: matchedStaff.dataScope,
+        }, rememberMe)
+        router.push('/dashboard')
+      } else {
+        setError('Invalid username or password')
+      }
+    } catch (error) {
+      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+      setError(timedOut ? 'Sign-in is taking too long. Check the connection and try again.' : error instanceof Error ? error.message : 'Unable to sign in. Try again.')
+    } finally {
       setIsLoading(false)
     }
   }

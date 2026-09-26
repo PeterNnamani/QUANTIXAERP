@@ -5,6 +5,7 @@ import Link from 'next/link'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { getDefaultRoles, saveRoles, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
+import { replaceRole } from '@/lib/record-upsert'
 
 const availablePermissions: { key: PermissionKey; label: string }[] = [
     { key: 'dashboard', label: 'Dashboard' },
@@ -27,6 +28,7 @@ export default function RoleManagementPage() {
     const [roleTemplate, setRoleTemplate] = useState('Custom')
     const [rolePermissions, setRolePermissions] = useState<PermissionKey[]>(['dashboard'])
     const [roleDataScope, setRoleDataScope] = useState<RoleDefinition['dataScope']>('team')
+    const [editingRoleId, setEditingRoleId] = useState('')
 
     const selectedRole = useMemo(
         () => roles.find((role) => role.id === selectedRoleId) || roles[0],
@@ -39,15 +41,19 @@ export default function RoleManagementPage() {
         )
     }
 
+    const loadRoleForEdit = (role: RoleDefinition) => {
+        setEditingRoleId(role.id)
+        setRoleName(role.name)
+        setRoleDescription(role.description)
+        setRoleTemplate(role.template || 'Custom')
+        setRolePermissions(role.permissions)
+        setRoleDataScope(role.dataScope)
+    }
+
     const handleCreateRole = () => {
-        const id = roleName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+        const id = editingRoleId || roleName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
         if (!id) {
             alert('Enter a valid role name.')
-            return
-        }
-
-        if (roles.some((role) => role.id === id)) {
-            alert('A role with that name already exists. Choose another name.')
             return
         }
 
@@ -61,12 +67,13 @@ export default function RoleManagementPage() {
             template: roleTemplate,
         }
 
-        const nextRoles = [...roles, nextRole]
-        setRoles(nextRoles)
-        updateState({ roles: nextRoles })
-        saveRoles(nextRoles)
-        setSelectedRoleId(nextRole.id)
-        alert(`Created role ${nextRole.name}`)
+        const saved = replaceRole(roles, nextRole)
+        setRoles(saved.roles)
+        updateState({ roles: saved.roles })
+        saveRoles(saved.roles)
+        setSelectedRoleId(saved.roles.find((role: RoleDefinition) => role.name === roleName)?.id || nextRole.id)
+        setEditingRoleId('')
+        alert(saved.updated ? `Updated role ${roleName}` : `Created role ${roleName}`)
     }
 
     return (
@@ -136,8 +143,8 @@ export default function RoleManagementPage() {
                         </div>
 
                         <div className="panel-card">
-                            <div className="panel-title">Create a new role</div>
-                            <div className="page-subtitle">Build reusable role templates for branches, departments, and compliance groups.</div>
+                            <div className="panel-title">{editingRoleId ? 'Edit role' : 'Create a new role'}</div>
+                            <div className="page-subtitle">{editingRoleId ? 'Saving updates this role.' : 'Build reusable role templates for branches, departments, and compliance groups.'}</div>
 
                             <div className="form-grid two-up" style={{ marginTop: 18 }}>
                                 <div className="fg"><label>Role name</label><input value={roleName} onChange={(e) => setRoleName(e.target.value)} /></div>
@@ -171,7 +178,9 @@ export default function RoleManagementPage() {
                             </div>
 
                             <div className="inline-actions" style={{ justifyContent: 'space-between', marginTop: 24 }}>
+                                {selectedRole && <button className="action-btn" type="button" onClick={() => loadRoleForEdit(selectedRole)}>Edit selected role</button>}
                                 <button className="action-btn" type="button" onClick={() => {
+                                    setEditingRoleId('')
                                     setRoleName('New Role')
                                     setRoleDescription('Custom role for specialized users')
                                     setRoleTemplate('Custom')
@@ -180,7 +189,7 @@ export default function RoleManagementPage() {
                                 }}>
                                     Reset
                                 </button>
-                                <button className="action-btn primary" type="button" onClick={handleCreateRole}>Save role</button>
+                                <button className="action-btn primary" type="button" onClick={handleCreateRole}>{editingRoleId ? 'Update role' : 'Save role'}</button>
                             </div>
                         </div>
                     </div>
