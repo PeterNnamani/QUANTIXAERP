@@ -52,17 +52,18 @@ export default function LoginPage() {
     const matchedStaff = findStaffMemberByLogin(state.staffMembers, normalizedUsername, normalizedPin)
     const databaseUser = await findUserInDatabase(normalizedUsername, normalizedPin, state.roles)
 
-    // Validate credentials against database or staff members
+    // Validate credentials against database or staff members. Each branch reads
+    // the menu access of the record it signed in with, so a locally cached staff
+    // entry can never override permissions saved for the database user.
     const localAccess = matchedStaff ? savedMenuAccess({ ...matchedStaff, role: matchedStaff.roleId }) : null
     const databaseAccess = databaseUser && databaseUser.accessLevels !== undefined
         ? savedMenuAccess({ accessLevels: databaseUser.accessLevels, role: databaseUser.role })
         : null
-    const menuAccess = localAccess || databaseAccess
 
     if (databaseUser) {
       await recordUserLogin(databaseUser)
       saveRememberedUsername(rememberMe)
-      login(menuAccess ? { ...databaseUser, ...menuAccess } : databaseUser, rememberMe)
+      login(databaseAccess ? { ...databaseUser, ...databaseAccess } : databaseUser, rememberMe)
       setIsLoading(false)
       router.push('/dashboard')
     } else if (matchedStaff) {
@@ -73,9 +74,9 @@ export default function LoginPage() {
         roleId: matchedStaff.roleId,
         roleName: matchedStaff.roleName,
         staffId: matchedStaff.staffId,
-        permissions: menuAccess?.permissions || matchedStaff.permissions,
-        visibleMenus: menuAccess?.visibleMenus || matchedStaff.visibleMenus,
-        accessLevels: menuAccess?.accessLevels || matchedStaff.accessLevels,
+        permissions: localAccess?.permissions || matchedStaff.permissions,
+        visibleMenus: localAccess?.visibleMenus || matchedStaff.visibleMenus,
+        accessLevels: localAccess?.accessLevels || matchedStaff.accessLevels,
         dataScope: matchedStaff.dataScope,
       }, rememberMe)
       setIsLoading(false)
