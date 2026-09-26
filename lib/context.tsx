@@ -997,14 +997,13 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   // Load from localStorage or sessionStorage on mount
   useEffect(() => {
     const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
-    const savedState = user?.companyId
-      ? localStorage.getItem(`${STORAGE_KEY}:${user.companyId}`)
-      : null
+    let companyId = user?.companyId
 
     if (savedUser) {
       try {
         const parsed = JSON.parse(savedUser)
         const enriched = enrichStoredUser(parsed)
+        companyId = enriched.companyId || companyId
         setUser(enriched)
         // persist back the enriched user so other sessions/readers get visibleMenus
         const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
@@ -1013,6 +1012,9 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         setUser(JSON.parse(savedUser))
       }
     }
+    const savedState = companyId
+      ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
+      : null
     if (savedState) {
       const parsedState = JSON.parse(savedState)
       setState({
