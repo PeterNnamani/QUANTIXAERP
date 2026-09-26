@@ -1,5 +1,6 @@
 import { Geist } from 'next/font/google'
 import type { Metadata, Viewport } from 'next'
+import Script from 'next/script'
 import './globals.css'
 import './dashboard-styles.css'
 import { AccountingProvider } from '@/lib/context'
@@ -25,8 +26,11 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className="bg-background">
+    <html lang="en" className="bg-background" suppressHydrationWarning>
       <body className={`${geist.className} antialiased`}>
+        <Script id="hw-theme" strategy="beforeInteractive">
+          {`try{var t=localStorage.getItem('hw-theme');if(t==='dark'||t==='light')document.documentElement.dataset.theme=t;else if(window.matchMedia('(prefers-color-scheme: dark)').matches)document.documentElement.dataset.theme='dark'}catch(e){}`}
+        </Script>
         <AccountingProvider>
           {children}
         </AccountingProvider>
