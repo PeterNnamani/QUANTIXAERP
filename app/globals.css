@@ -9274,16 +9274,16 @@ html[data-theme='dark'] .pricing-row span {
     overflow-x: visible;
   }
 
-  .bank-register-head {
-    display: none;
-  }
-
   .bank-register-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 10px 14px;
     min-width: 0;
     padding: 14px 0;
+  }
+
+  .bank-register-row.bank-register-head {
+    display: none;
   }
 
   .bank-register-row>span {
