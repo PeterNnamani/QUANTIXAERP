@@ -9098,6 +9098,13 @@ html[data-theme='dark'] .pricing-row span {
   font-size: 11px;
 }
 
+.bank-row-edit {
+  margin-top: 6px;
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .bank-empty-state {
   padding: 18px 0 4px;
   border-top: 1px solid var(--border);
