@@ -1830,6 +1830,38 @@ html[data-theme='dark'] .card {
   border-color: var(--border);
 }
 
+html[data-theme='dark'] .invoice-document,
+html[data-theme='dark'] .invoice-document h2,
+html[data-theme='dark'] .receipt-items th,
+html[data-theme='dark'] .receipt-items td,
+html[data-theme='dark'] .landing-plan,
+html[data-theme='dark'] .auth-hero .auth-card,
+html[data-theme='dark'] .settings-danger-card,
+html[data-theme='dark'] .settings-danger-card.severe,
+html[data-theme='dark'] .settings-bank-hero,
+html[data-theme='dark'] .settings-bank-hero-icon,
+html[data-theme='dark'] .management-report,
+html[data-theme='dark'] table,
+html[data-theme='dark'] th,
+html[data-theme='dark'] td {
+  background: var(--bg2);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+html[data-theme='dark'] .receipt-rule {
+  border-top-color: var(--text3);
+}
+
+html[data-theme='dark'] .auth-hero .auth-card input,
+html[data-theme='dark'] .auth-hero .auth-card select,
+html[data-theme='dark'] .auth-hero .auth-card textarea,
+html[data-theme='dark'] .invoice-document,
+html[data-theme='dark'] .invoice-document strong,
+html[data-theme='dark'] .invoice-document span {
+  color: var(--text);
+}
+
 html[data-theme='dark'] .topbar {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.38);
 }
@@ -4447,8 +4479,15 @@ html[data-theme='dark'] .topbar {
 
 .notification-item {
   display: flex;
+  width: 100%;
   gap: 10px;
   padding: 13px 15px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
   border-bottom: 1px solid var(--border);
 }
 
@@ -4545,6 +4584,28 @@ html[data-theme='dark'] .topbar {
 .notification-preview button {
   align-self: flex-start;
   padding: 0;
+}
+
+@media (max-width: 820px) {
+  .notification-panel,
+  .notification-preview {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 60px);
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: calc(100vw - 24px);
+    max-height: min(70vh, calc(100svh - 88px));
+  }
+
+  .notification-list {
+    max-height: min(58vh, calc(100svh - 150px));
+  }
+
+  .notification-preview span,
+  .notification-item p {
+    overflow-wrap: anywhere;
+  }
 }
 
 @keyframes notification-preview-in {

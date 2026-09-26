@@ -6,7 +6,7 @@ import BulkImport from '@/components/bulk-import'
 import { useAccounting, type BankAccount, type CompanySettings, type UserSettings } from '@/lib/context'
 import { formatCurrency } from '@/lib/utils'
 import { canEditPermission, getDefaultRoles, saveRoles, type RoleDefinition, type PermissionKey } from '@/lib/rbac'
-import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipedCompanyBooks, wipeConfirmationPhrase } from '@/lib/company-lifecycle'
+import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipeConfirmationPhrase } from '@/lib/company-lifecycle'
 import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
 import { dedupeChartOfAccounts, requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
 
@@ -22,7 +22,7 @@ const sidebarSections = [
 ]
 
 export default function SettingsPage() {
-  const { state, updateState, addAuditLog, user, logout } = useAccounting()
+  const { state, updateState, resetCompanyBooks, addAuditLog, user, logout } = useAccounting()
   const defaultUserSettings: UserSettings = {
     dateFormat: 'DD/MM/YYYY', timezone: 'Africa/Lagos',
     notifications: { email: true, push: true, whatsapp: true },
@@ -332,6 +332,11 @@ export default function SettingsPage() {
     }
     localStorage.removeItem('hw_accounting_data')
     sessionStorage.removeItem('hw_accounting_data')
+    ;[localStorage, sessionStorage].forEach((storage) => {
+      Object.keys(storage).forEach((key) => {
+        if (key.startsWith('quantixa:notifications:') || key.startsWith('quantixa:admin-audit-cursor:')) storage.removeItem(key)
+      })
+    })
   }
 
   const runLifecycle = async (action: 'wipe' | 'close') => {
@@ -345,28 +350,38 @@ export default function SettingsPage() {
     setLifecycleStatus(null)
     try {
       let database = 'skipped'
+      let databaseError = ''
       if (user?.companyId) {
-        const response = await fetch('/api/company/lifecycle', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action, companyId: user.companyId, staffId: user.staffId, username: user.username }),
-        })
-        const result = await response.json()
-        if (!response.ok || !result.success) throw new Error(result.error || 'Unable to update the company.')
-        database = result.database || 'cleared'
+        try {
+          const response = await fetch('/api/company/lifecycle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, companyId: user.companyId, staffId: user.staffId, username: user.username }),
+          })
+          const result = await response.json()
+          if (!response.ok || !result.success) databaseError = result.error || 'Unable to update the company.'
+          else database = result.database || 'cleared'
+        } catch (error) {
+          databaseError = error instanceof Error ? error.message : 'Unable to update the company.'
+        }
       }
       if (action === 'close') {
+        if (databaseError) throw new Error(databaseError)
         clearCompanyStorage()
         logout()
         return
       }
       clearCompanyStorage()
-      updateState(wipedCompanyBooks(state))
+      resetCompanyBooks()
       setOpeningCapital(0)
       setWipeConfirm('')
       setCloseConfirm('')
-      const databaseNote = database === 'skipped' ? ' This browser was cleared. The database was not connected.' : ' The database was cleared as well.'
-      setLifecycleStatus({ tone: 'success', message: `Company data was removed. The company and staff sign-in remain.${databaseNote}` })
+      const databaseNote = databaseError
+        ? ` This workspace is now empty. The database was not cleared: ${databaseError}`
+        : database === 'skipped'
+          ? ' This browser was cleared. The database was not connected.'
+          : ' The database was cleared as well.'
+      setLifecycleStatus({ tone: databaseError ? 'error' : 'success', message: `Company data was removed. The company and staff sign-in remain.${databaseNote}` })
     } catch (error) {
       setLifecycleStatus({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to update the company.' })
     } finally {

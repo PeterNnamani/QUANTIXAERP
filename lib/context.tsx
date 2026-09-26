@@ -61,6 +61,7 @@ import { buildSeedChartOfAccounts, dedupeChartOfAccounts } from '@/lib/accountin
 import { generateSku } from '@/lib/sku'
 import { EXP_CATS } from '@/lib/utils'
 import { setExportCompanyName } from '@/lib/export-utils'
+import { wipedCompanyBooks } from '@/lib/company-lifecycle'
 import { mergeReceivablesFromSales } from '@/lib/receivables'
 import { bankTxnKey, businessReference, isUuid, isoDate, selectUnpostedJournals, shouldPostExpenseCash, subledgerReference } from '@/lib/accounting/sync'
 
@@ -412,6 +413,7 @@ export interface AccountingContextType {
   subscriptionLoaded: boolean
   state: AppState
   updateState: (updates: Partial<AppState>, options?: { persist?: boolean }) => void
+  resetCompanyBooks: () => void
   deleteInventoryItems: (skus: string[]) => Promise<void>
   login: (userData: User, remember: boolean) => void
   logout: () => void
@@ -792,6 +794,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true)
   const companySettingsWriteQueue = useRef(Promise.resolve())
   const trialExpiryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const remoteLoadToken = useRef(0)
 
   // Fetch persisted banks and bank transactions from Supabase when available
   useEffect(() => {
@@ -802,6 +805,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     async function loadRemoteData() {
       if (!supabase || !user?.companyId) return
       const companyId = user.companyId
+      const token = remoteLoadToken.current
       try {
         const [{ data: companyData, error: companyErr }, { data: salesData, error: salesErr }, { data: saleItemsData, error: saleItemsErr }, { data: purchasesData, error: purchasesErr }, { data: expensesData, error: expensesErr }, { data: categoriesData, error: categoriesErr }, { data: inventoryData, error: inventoryErr }, { data: prepaymentsData, error: prepaymentsErr }, { data: contactsData, error: contactsErr }, { data: banksData, error: banksErr }, { data: txnsData, error: txnsErr }, { data: loansData, error: loansErr }, { data: loanRepaymentsData, error: loanRepaymentsErr }, { data: receivablesData, error: receivablesErr }, { data: payablesData, error: payablesErr }, { data: accountsData, error: accountsErr }, { data: entriesData, error: entriesErr }, { data: linesData, error: linesErr }, { data: auditLogsData, error: auditLogsErr }, { data: subscriptionData, error: subscriptionErr }] = await Promise.all([
           supabase.from('companies').select('name,settings,created_at').eq('id', companyId).maybeSingle(),
@@ -853,7 +857,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         if (auditLogsErr && auditLogsErr.code !== 'PGRST205') console.error('Error loading audit logs from Supabase', auditLogsErr)
         if (subscriptionErr && subscriptionErr.code !== 'PGRST205') console.error('Error loading subscription from Supabase', subscriptionErr)
 
-        if (!mounted) return
+        if (!mounted || token !== remoteLoadToken.current) return
 
         try {
           const params = new URLSearchParams({ companyId, ...(user.staffId ? { staffId: user.staffId } : { username: user.username || '' }) })
@@ -946,6 +950,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         } else {
           setUser((current) => current ? { ...current, subscriptionPlan: undefined, subscriptionStatus: 'expired', trialEndsAt: undefined } : current)
         }
+
+        if (!mounted || token !== remoteLoadToken.current) return
 
         if (banksData && banksData.length > 0) {
           const banksMap: Record<string, number> = {}
@@ -1684,6 +1690,11 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     }
   }, [user])
 
+  const resetCompanyBooks = () => {
+    remoteLoadToken.current += 1
+    updateState(wipedCompanyBooks(state))
+  }
+
   const addAuditLog = (action: string, type: string, reference: string, details: string) => {
     const timestamp = new Date().toISOString()
     const module = type.split('_')[0].toUpperCase()
@@ -1732,6 +1743,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     subscriptionLoaded,
     state,
     updateState,
+    resetCompanyBooks,
     deleteInventoryItems,
     login,
     logout,

@@ -301,14 +301,28 @@ export default function NotificationBell({ user }: { user: User }) {
         snapshotsRef.current.auditLogs = new Set(state.auditLogs.map((log) => getRecordId(log, log.timestamp)))
     }, [auditCursorKey, pushEnabled, state.auditLogs, state.bankTxns, state.expenses, state.inventory, state.purchases, state.sales, state.staffMembers, subscriptionLoaded, user])
 
+    const panelRef = useRef<HTMLDivElement>(null)
     const unreadCount = notifications.filter((item) => !item.read).length
 
+    useEffect(() => {
+        if (!isOpen) return
+        const closeOnOutside = (event: MouseEvent) => {
+            if (!panelRef.current?.contains(event.target as Node)) setIsOpen(false)
+        }
+        document.addEventListener('mousedown', closeOnOutside)
+        return () => document.removeEventListener('mousedown', closeOnOutside)
+    }, [isOpen])
+
+    const dismissNotification = (id: string) => {
+        setNotifications((current) => current.filter((item) => item.id !== id))
+    }
+
     const markAllRead = () => {
-        setNotifications((current) => current.map((item) => ({ ...item, read: true })))
+        setNotifications([])
     }
 
     return (
-        <div className="notification-wrap">
+        <div className="notification-wrap" ref={panelRef}>
             <button
                 type="button"
                 className={`notification-trigger ${unreadCount > 0 ? 'has-unread' : ''}`}
@@ -333,10 +347,10 @@ export default function NotificationBell({ user }: { user: User }) {
                     <div className="notification-panel-head"><strong>Notifications</strong><button type="button" onClick={markAllRead}><Check size={14} /> Mark all as read</button></div>
                     <div className="notification-list">
                         {notifications.length === 0 ? <div className="notification-empty">No notifications yet.</div> : notifications.map((item) => (
-                            <div className={`notification-item ${item.read ? 'read' : ''}`} key={item.id}>
+                            <button type="button" className="notification-item" key={item.id} onClick={() => dismissNotification(item.id)}>
                                 <span className={`notification-dot ${item.tone}`} />
                                 <div><strong>{item.title}</strong><p>{item.message}</p><small>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small></div>
-                            </div>
+                            </button>
                         ))}
                     </div>
                 </div>
