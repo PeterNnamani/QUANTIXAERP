@@ -35,9 +35,17 @@ export default function DashboardPage() {
     const activeSales = state.sales.filter((sale) => sale.status?.toUpperCase() !== 'VOID')
     const activeExpenses = state.expenses.filter((expense) => expense.status?.toUpperCase() !== 'VOID')
     const activePurchases = state.purchases.filter((purchase) => purchase.status?.toUpperCase() !== 'VOID')
-    const salesSeries = activeSales.map((sale) => ({ date: sale.date, amount: Number(sale.totalAmount || 0), status: sale.status }))
-    const expenseSeries = activeExpenses.map((expense) => ({ date: expense.date, amount: Number(expense.amount || 0), status: expense.status }))
-    const purchaseSeries = activePurchases.map((purchase) => ({ date: purchase.date, amount: Number(purchase.total || 0), status: purchase.status }))
+    const datedAmount = (record: any, amountFields: string[]) => {
+        const rawAmount = amountFields.map((field) => record?.[field]).find((value) => value !== undefined && value !== null && value !== '')
+        return {
+            date: String(record?.date || record?.invoiceDate || record?.sale_date || record?.expense_date || record?.purchase_date || '').slice(0, 10),
+            amount: Number(rawAmount || 0),
+            status: record?.status,
+        }
+    }
+    const salesSeries = activeSales.map((sale) => datedAmount(sale, ['totalAmount', 'total', 'amount']))
+    const expenseSeries = activeExpenses.map((expense) => datedAmount(expense, ['amount', 'total']))
+    const purchaseSeries = activePurchases.map((purchase) => datedAmount(purchase, ['total', 'amount']))
 
     const revenueToday = sumOnDate(salesSeries, today)
     const revenueYesterday = sumOnDate(salesSeries, yesterday)
@@ -45,9 +53,10 @@ export default function DashboardPage() {
     const expensesYesterday = sumOnDate(expenseSeries, yesterday) + sumOnDate(purchaseSeries, yesterday)
     const profitToday = revenueToday - expensesToday
     const profitYesterday = revenueYesterday - expensesYesterday
-    const cashAvailable = state.bankAccounts.length > 0
-        ? state.bankAccounts.filter((account) => String(account.status || 'active').toLowerCase() === 'active').reduce((sum, account) => sum + Number(account.balance || 0), 0)
-        : Object.values(state.banks).reduce((sum, balance) => sum + Number(balance || 0), 0)
+    const accountNames = new Set(state.bankAccounts.map((account) => account.name))
+    const accountCash = state.bankAccounts.filter((account) => String(account.status || 'active').toLowerCase() === 'active').reduce((sum, account) => sum + Number(account.balance || 0), 0)
+    const unassignedCash = Object.entries(state.banks).reduce((sum, [name, balance]) => accountNames.has(name) ? sum : sum + Number(balance || 0), 0)
+    const cashAvailable = state.bankAccounts.length > 0 ? accountCash + unassignedCash : Object.values(state.banks).reduce((sum, balance) => sum + Number(balance || 0), 0)
     const receivablesBalance = state.receivables.reduce((sum, item) => sum + outstanding(item), 0)
     const payablesBalance = state.payables.reduce((sum, item) => sum + outstanding(item), 0)
     const receivablesOverdue = overdueAmount(state.receivables, today)
@@ -73,6 +82,8 @@ export default function DashboardPage() {
         profit: total.profit + point.profit,
     }), { revenue: 0, expenses: 0, profit: 0 })
     const chartMax = Math.max(...chart.flatMap((point) => [point.revenue, point.expenses, Math.abs(point.profit)]), 1)
+    const chartHeight = 200
+    const barHeight = (value: number) => value === 0 ? 0 : Math.max((Math.abs(value) / chartMax) * chartHeight, 4)
     const hasChartActivity = chart.some((point) => point.revenue || point.expenses || point.profit)
 
     const cashflow = useMemo(() => {
@@ -167,11 +178,11 @@ export default function DashboardPage() {
                                 <div className="financial-performance-visual">
                                     <div className="financial-performance-chart">
                                         {chart.map((point) => (
-                                            <div key={`${point.start}-${point.label}`} className="financial-performance-bar" title={`${point.start} to ${point.end}`}>
+                                            <div key={`${point.start}-${point.label}`} className="financial-performance-bar" title={`${point.label}: Revenue ${formatCurrency(point.revenue)}, Expenses ${formatCurrency(point.expenses)}, Profit ${formatCurrency(point.profit)}`}>
                                                 <div className="financial-performance-bar-group">
-                                                    <div className="financial-performance-bar-fill revenue" style={{ height: `${point.revenue === 0 ? 0 : Math.max((point.revenue / chartMax) * 100, 2)}%` }} />
-                                                    <div className="financial-performance-bar-fill expenses" style={{ height: `${point.expenses === 0 ? 0 : Math.max((point.expenses / chartMax) * 100, 2)}%` }} />
-                                                    <div className="financial-performance-bar-fill profit" style={{ height: `${point.profit === 0 ? 0 : Math.max((Math.abs(point.profit) / chartMax) * 100, 2)}%` }} />
+                                                    <div className="financial-performance-bar-fill revenue" style={{ height: `${barHeight(point.revenue)}px` }} />
+                                                    <div className="financial-performance-bar-fill expenses" style={{ height: `${barHeight(point.expenses)}px` }} />
+                                                    <div className={`financial-performance-bar-fill profit${point.profit < 0 ? ' loss' : ''}`} style={{ height: `${barHeight(point.profit)}px` }} />
                                                 </div>
                                                 <span>{point.label}</span>
                                             </div>

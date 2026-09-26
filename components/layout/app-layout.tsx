@@ -5,7 +5,7 @@ import { Mic, Send } from 'lucide-react'
 import { useAccounting } from '@/lib/context'
 import { usePathname, useRouter } from 'next/navigation'
 import { answerCompanyQuestion, companyBrief, type AssistantBooks } from '@/lib/assistant'
-import { canAccessRoute, canEditPermission, getRoutePermission } from '@/lib/rbac'
+import { canAccessRoute, canEditPermission, getRoutePermission, hasExplicitMenuGrant } from '@/lib/rbac'
 import { planCanAccessRoute } from '@/lib/licensing'
 import Navigation from './navigation'
 import Topbar from './topbar'
@@ -161,7 +161,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       return
     }
 
-    if (subscriptionLoaded && !pathname?.startsWith('/subscription-and-licensing') && !planCanAccessRoute(user.subscriptionPlan, pathname || '/dashboard', user.subscriptionStatus)) {
+    const routePermission = getRoutePermission(pathname || '/dashboard')
+    const explicitGrant = hasExplicitMenuGrant(user, routePermission) || (routePermission === 'ledger' && hasExplicitMenuGrant(user, 'accounting'))
+    if (subscriptionLoaded && !pathname?.startsWith('/subscription-and-licensing') && !explicitGrant && !planCanAccessRoute(user.subscriptionPlan, pathname || '/dashboard', user.subscriptionStatus)) {
       router.replace('/subscription-and-licensing')
     }
   }, [router, user, pathname, subscriptionLoaded])
@@ -173,7 +175,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   }
 
   const hasRoleAccess = canAccessRoute(user, pathname || '/dashboard')
-  const hasPlanAccess = pathname?.startsWith('/subscription-and-licensing') || planCanAccessRoute(user.subscriptionPlan, pathname || '/dashboard', user.subscriptionStatus)
+  const routePermissionForPlan = getRoutePermission(pathname || '/dashboard')
+  const explicitPlanGrant = hasExplicitMenuGrant(user, routePermissionForPlan) || (routePermissionForPlan === 'ledger' && hasExplicitMenuGrant(user, 'accounting'))
+  const hasPlanAccess = pathname?.startsWith('/subscription-and-licensing') || explicitPlanGrant || planCanAccessRoute(user.subscriptionPlan, pathname || '/dashboard', user.subscriptionStatus)
 
   if (!hasRoleAccess) {
     return (

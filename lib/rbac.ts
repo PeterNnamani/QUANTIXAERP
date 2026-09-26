@@ -254,26 +254,81 @@ function getRolePermissions(user: Pick<UserWithRole, 'role' | 'permissions'> | n
     return DEFAULT_ROLE_PERMISSIONS[user.role] || []
 }
 
+export function explicitAccessLevels(accessLevels: AccessLevels | null | undefined): AccessLevels | null {
+    if (!accessLevels || typeof accessLevels !== 'object') return null
+    const explicit: AccessLevels = {}
+    Object.entries(accessLevels).forEach(([key, level]) => {
+        if (level === 'view' || level === 'edit') explicit[key as PermissionKey] = level
+    })
+    return Object.keys(explicit).length > 0 ? explicit : null
+}
+
+export function menuAccessFromLevels(accessLevels: AccessLevels): { accessLevels: AccessLevels; visibleMenus: PermissionKey[]; permissions: PermissionKey[] } {
+    const visibleMenus = Object.keys(accessLevels) as PermissionKey[]
+    return {
+        accessLevels,
+        visibleMenus,
+        permissions: visibleMenus.filter((key) => accessLevels[key] === 'edit'),
+    }
+}
+
+function roleTemplateAccess(role: string | undefined): AccessLevels {
+    const roleId = String(role || '').toLowerCase().replace(/[_\s]+/g, '-')
+    const roleDef = RBAC_TEMPLATES.find((item) => item.id === roleId) || (roleId === 'md' ? RBAC_TEMPLATES.find((item) => item.id === 'business-owner') : undefined)
+    const access: AccessLevels = {}
+    roleDef?.visibleMenus?.forEach((key) => { access[key] = 'view' })
+    roleDef?.permissions.forEach((key) => { access[key] = 'edit' })
+    return access
+}
+
+function sameAccess(left: AccessLevels, right: AccessLevels) {
+    const keys = new Set([...Object.keys(left), ...Object.keys(right)])
+    for (const key of keys) {
+        if (left[key as PermissionKey] !== right[key as PermissionKey]) return false
+    }
+    return true
+}
+
+export function savedMenuAccess(record: { role?: string; roleId?: string; accessLevels?: AccessLevels | null; visibleMenus?: PermissionKey[] | null; permissions?: PermissionKey[] | null } | null | undefined) {
+    if (!record) return null
+    if (record.accessLevels && typeof record.accessLevels === 'object' && !Array.isArray(record.accessLevels)) {
+        return menuAccessFromLevels(explicitAccessLevels(record.accessLevels) || {})
+    }
+    const fromLists: AccessLevels = {}
+    record.visibleMenus?.forEach((key) => { fromLists[key] = 'view' })
+    record.permissions?.forEach((key) => { fromLists[key] = 'edit' })
+    if (Object.keys(fromLists).length === 0) return null
+    if (sameAccess(fromLists, roleTemplateAccess(record.role || record.roleId))) return null
+    return menuAccessFromLevels(fromLists)
+}
+
+export function resolveMenuAccess(user: Pick<UserWithRole, 'role' | 'permissions' | 'visibleMenus' | 'accessLevels'> | null | undefined) {
+    return savedMenuAccess(user) || menuAccessFromLevels(roleTemplateAccess(user?.role))
+}
+
+export function hasExplicitMenuGrant(user: Pick<UserWithRole, 'accessLevels'> | null | undefined, permission: PermissionKey | null): boolean {
+    if (!permission) return false
+    const level = explicitAccessLevels(user?.accessLevels)?.[permission]
+    return level === 'view' || level === 'edit'
+}
+
 export function getPermissionAccessLevel(
     user: Pick<UserWithRole, 'role' | 'permissions' | 'visibleMenus' | 'accessLevels' | 'subscriptionPlan' | 'subscriptionStatus'> | null | undefined,
     permission: PermissionKey,
 ): AccessLevel | null {
     if (!user) return null
     const normalizedRole = String(user.role || '').toLowerCase().replace(/[_\s]+/g, '-')
-    const isOwner = normalizedRole === 'business-owner' || normalizedRole === 'md'
-    if (user.accessLevels !== undefined) {
+    if (user.accessLevels && typeof user.accessLevels === 'object' && !Array.isArray(user.accessLevels)) {
         const selectedLevel = user.accessLevels[permission]
-        if (permission === 'bankTxn' || permission === 'banks') return selectedLevel === 'edit' ? 'view' : selectedLevel || null
-        return selectedLevel || null
+        const level = selectedLevel === 'view' || selectedLevel === 'edit' ? selectedLevel : null
+        if ((permission === 'bankTxn' || permission === 'banks') && level === 'edit') return 'view'
+        return level
     }
     if (ownerHasFullAccess(user)) {
         if (permission === 'bankTxn' || permission === 'banks') return 'view'
         if (permission === 'admin' || permission === 'settings' || OWNER_OPERATIONAL_PERMISSIONS.includes(permission)) return 'edit'
     }
-    if (permission === 'settings') {
-        if (normalizedRole === 'super-admin') return 'edit'
-        return 'view'
-    }
+    if (permission === 'settings' && normalizedRole === 'super-admin') return 'edit'
     if (getRolePermissions(user).includes(permission)) return 'edit'
     if (user.visibleMenus?.includes(permission)) return 'view'
 
@@ -310,7 +365,10 @@ export function getRoutePermission(pathname: string): PermissionKey | null {
 
 export function canAccessRoute(user: Pick<UserWithRole, 'role' | 'permissions' | 'visibleMenus' | 'accessLevels'> | null | undefined, pathname: string): boolean {
     const permission = getRoutePermission(pathname)
-    return permission ? roleHasPermission(user, permission) : true
+    if (!permission) return true
+    if (roleHasPermission(user, permission)) return true
+    if (permission === 'ledger' && roleHasPermission(user, 'accounting')) return true
+    return false
 }
 
 export function generateStaffId(name: string): string {
@@ -352,6 +410,8 @@ export function getVisibleNavigationItems(user: Pick<UserWithRole, 'role' | 'per
         { label: 'Daily Closing', href: '/daily-close', group: 'ACCOUNTING', permission: 'dailyClose' as PermissionKey, icon: 'dailyClose' },
         { label: 'Audit Trail', href: '/audit', group: 'AUDIT & ADMIN', permission: 'admin' as PermissionKey, icon: 'audit' },
         { label: 'General Ledger', href: '/ledger', group: 'ACCOUNTING', permission: 'ledger' as PermissionKey, icon: 'ledger' },
+        { label: 'Reports', href: '/reports', group: 'REPORTS', permission: 'reports' as PermissionKey, icon: 'reports' },
+        { label: 'Tax', href: '/tax', group: 'ACCOUNTING', permission: 'tax' as PermissionKey, icon: 'tax' },
         { label: 'Receivables', href: '/receivables', group: 'ACCOUNTING', permission: 'receivables' as PermissionKey, icon: 'receivables' },
         { label: 'Payables', href: '/payables', group: 'ACCOUNTING', permission: 'payables' as PermissionKey, icon: 'payables' },
         { label: 'Supplier Balances', href: '/supplier-balances', group: 'ACCOUNTING', permission: 'supplierBalances' as PermissionKey, icon: 'supplierBalances' },
@@ -369,6 +429,7 @@ export function getVisibleNavigationItems(user: Pick<UserWithRole, 'role' | 'per
     ]
 
     return allItems.filter((item) => {
-        return roleHasPermission(user, item.permission)
+        if (roleHasPermission(user, item.permission)) return true
+        return item.permission === 'ledger' && roleHasPermission(user, 'accounting')
     })
 }

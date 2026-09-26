@@ -6,7 +6,7 @@ import BulkImport from '@/components/bulk-import'
 import { useAccounting } from '@/lib/context'
 import { Sale } from '@/lib/context'
 import { buildReceivableFromSale, mergeReceivablesFromSales } from '@/lib/receivables'
-import { formatCurrency, makeID, getCurrentDate, PAYMENT_TERMS, canEdit, parseNumeric } from '@/lib/utils'
+import { formatCurrency, makeID, getCurrentDate, PAYMENT_TERMS, canEdit, parseNumeric, triggerAppToast } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
 import { parseExcelFile, parseImportDate } from '@/lib/import-utils'
 
@@ -165,7 +165,7 @@ export default function SalesPage() {
       newItems[index] = { ...newItems[index], product: '', unitPrice: 0, total: 0 }
     }
 
-    if (field === 'qty' || field === 'unitPrice') {
+    if (field !== 'dept') {
       const qty = parseFloat(newItems[index].qty as any) || 0
       const unitPrice = parseFloat(newItems[index].unitPrice as any) || 0
       newItems[index].total = qty * unitPrice
@@ -239,31 +239,17 @@ export default function SalesPage() {
       deviceUsed,
     }
 
-    const response = await fetch('/api/sales', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ companyId: user?.companyId, sale }),
-    })
-    const result = await response.json()
-    if (!response.ok || !result.success) {
-      alert(result.error || 'Unable to save sale.')
-      return
-    }
-
     const updatedBanks = { ...state.banks }
-    const postedBankAccount = result.bankAccount as { id: string; name: string; balance: number } | null
-    const destination = postedBankAccount?.name || (isCashPayment
+    const destination = isCashPayment
       ? accountOptions.find((account) => account.toLowerCase().includes('cash')) || accountOptions[0] || ''
-      : sale.paymentAccount)
+      : sale.paymentAccount
     const updatedBankAccounts = state.bankAccounts.map((account) => {
-      if (!(isPaidSale || isPartPayment)) return account
-      const isPostedAccount = postedBankAccount ? account.id === postedBankAccount.id : account.name === destination
-      if (!isPostedAccount) return account
-      const balance = postedBankAccount ? postedBankAccount.balance : account.balance + amountPaid
+      if (!(isPaidSale || isPartPayment) || account.name !== destination) return account
+      const balance = account.balance + amountPaid
       updatedBanks[account.name] = balance
       return { ...account, balance }
     })
-    if ((isPaidSale || isPartPayment) && updatedBankAccounts.every((account) => account.name !== destination) && destination) {
+    if ((isPaidSale || isPartPayment) && destination && updatedBankAccounts.every((account) => account.name !== destination)) {
       updatedBanks[destination] = (updatedBanks[destination] ?? 0) + amountPaid
     }
     const paymentTxn = isPaidSale || isPartPayment ? [{
@@ -284,21 +270,40 @@ export default function SalesPage() {
       ? state.receivables
       : mergeReceivablesFromSales([sale], state.receivables)
 
-    const postedJournals = Array.isArray(result.journalEntries) ? result.journalEntries : []
-    const postedLines = Array.isArray(result.journalLines) ? result.journalLines : []
     updateState({
-      sales: [...state.sales, sale],
+      sales: [sale, ...state.sales],
       inventory: inventoryUpdates,
       banks: updatedBanks,
       bankAccounts: updatedBankAccounts,
       bankTxns: [...paymentTxn, ...state.bankTxns],
       receivables: nextReceivables,
-      journalEntries: [...postedJournals, ...state.journalEntries],
-      journalLines: [...postedLines, ...state.journalLines],
     })
     setSelectedSaleId(sale.id)
     setCurrentPage(1)
     addAuditLog('CREATE', 'SALE', sale.id, `Sale created for ${sale.customer}: ${formatCurrency(totalAmount)}`)
+
+    try {
+      const response = await fetch('/api/sales', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId: user?.companyId, sale }),
+      })
+      const result = await response.json()
+      if (!response.ok || !result.success) {
+        triggerAppToast('Sale saved', result.error || 'The sale is in the register on this device.')
+      } else {
+        const postedJournals = Array.isArray(result.journalEntries) ? result.journalEntries : []
+        const postedLines = Array.isArray(result.journalLines) ? result.journalLines : []
+        if (postedJournals.length > 0 || postedLines.length > 0) {
+          updateState({
+            journalEntries: [...postedJournals, ...state.journalEntries],
+            journalLines: [...postedLines, ...state.journalLines],
+          })
+        }
+      }
+    } catch {
+      triggerAppToast('Sale saved', 'The sale is in the register on this device.')
+    }
     setShowForm(false)
     setFormData({
       date: getCurrentDate(),

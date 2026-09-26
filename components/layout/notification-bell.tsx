@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Bell, Check, X } from 'lucide-react'
 import { useAccounting, type User } from '@/lib/context'
 import { isPayrollActivity, pendingAuditActivity } from '@/lib/notifications'
+import { getPermissionAccessLevel } from '@/lib/rbac'
 import { supabase } from '@/lib/supabase.browser'
 
 type NotificationItem = {
@@ -56,7 +57,11 @@ const formatAuditActivity = (log: any, actor: string) => {
 
 const getAuditMessage = (log: any) => formatAuditActivity(log, log.user || 'System')
 
-const isSuperAdmin = (user: User) => ['super-admin', 'md', 'business-owner'].includes(String(user.role || '').toLowerCase())
+const receivesStaffActivity = (user: User) => {
+    const role = String(user.role || '').toLowerCase().replace(/[_\s]+/g, '-')
+    if (['super-admin', 'md', 'business-owner'].includes(role)) return true
+    return getPermissionAccessLevel(user, 'admin') !== null
+}
 
 export default function NotificationBell({ user }: { user: User }) {
     const { state, subscriptionLoaded } = useAccounting()
@@ -158,7 +163,7 @@ export default function NotificationBell({ user }: { user: User }) {
 
     useEffect(() => {
         const client = supabase
-        if (!subscriptionLoaded || !isSuperAdmin(user) || !client || !user.companyId) return
+        if (!subscriptionLoaded || !receivesStaffActivity(user) || !client || !user.companyId) return
 
         let cancelled = false
         const pollAuditActivity = async () => {
@@ -179,7 +184,13 @@ export default function NotificationBell({ user }: { user: User }) {
 
             const cursor = window.localStorage.getItem(auditCursorKey) || persistedCursor || ''
             const relevantLogs = data
-                .filter((log: any) => log.metadata?.staff_id !== (user.staffId || null))
+                .filter((log: any) => {
+                    const actorStaffId = log.metadata?.staff_id || ''
+                    const actorName = log.metadata?.user_name || ''
+                    if (user.staffId && actorStaffId) return actorStaffId !== user.staffId
+                    if (actorName && user.name) return actorName !== user.name
+                    return true
+                })
                 .filter((log: any) => !['LOGIN', 'LOGOUT'].includes(String(log.action || '').toUpperCase()))
             const { pending: pendingLogs, nextCursor } = pendingAuditActivity(relevantLogs, cursor)
 
@@ -215,7 +226,7 @@ export default function NotificationBell({ user }: { user: User }) {
             cancelled = true
             window.clearInterval(intervalId)
         }
-    }, [auditCursorKey, persistedCursor, pushEnabled, subscriptionLoaded, user.companyId, user.role, user.staffId, user.username, user.name])
+    }, [auditCursorKey, persistedCursor, pushEnabled, subscriptionLoaded, user.accessLevels, user.companyId, user.name, user.permissions, user.role, user.staffId, user.username, user.visibleMenus])
 
     useEffect(() => {
         if (user.companyId && !user.companyName) return
@@ -239,6 +250,7 @@ export default function NotificationBell({ user }: { user: User }) {
 
         const collections: Array<{ key: string; records: any[]; title: string; message: (record: any) => string; tone?: NotificationItem['tone'] }> = [
             { key: 'sales', records: state.sales, title: 'New sale recorded', message: (record) => `${record.customer || 'A customer'} sale for ${record.totalAmount || 0} was recorded.`, tone: 'success' },
+            { key: 'purchases', records: state.purchases, title: 'New purchase recorded', message: (record) => `${record.supplier || 'A supplier'} purchase for ${record.total || 0} was recorded.` },
             { key: 'expenses', records: state.expenses, title: 'New expense recorded', message: (record) => `${record.category || 'An expense'} entry for ${record.amount || 0} was recorded.` },
             { key: 'bankTxns', records: state.bankTxns, title: 'Bank transaction completed', message: (record) => `${record.activity || record.description || 'A bank transaction'} was completed.`, tone: 'success' },
             { key: 'staff', records: state.staffMembers, title: 'New staff member', message: (record) => `${record.name || 'A staff member'} was added to the workspace.`, tone: 'success' },
@@ -248,16 +260,29 @@ export default function NotificationBell({ user }: { user: User }) {
             collections.forEach(({ key, records }) => { snapshotsRef.current[key] = new Set(records.map((record) => getRecordId(record, key))) })
             snapshotsRef.current.inventory = new Set(state.inventory.filter((item) => item.closing <= (item.reorderLevel ?? 10)).map((item) => getRecordId(item, item.product)))
             snapshotsRef.current.auditLogs = new Set(state.auditLogs.map((log) => getRecordId(log, log.timestamp)))
+            if (receivesStaffActivity(user) && !supabase) {
+                const cursor = window.localStorage.getItem(auditCursorKey) || persistedCursor || ''
+                const logs = state.auditLogs.map((log) => ({ ...log, event_time: log.timestamp }))
+                const { pending, nextCursor } = pendingAuditActivity(logs, cursor)
+                pending.filter((log) => log.user !== user.name).forEach((log, index) => {
+                    window.setTimeout(() => publishRef.current('Staff activity', getAuditMessage(log), 'info'), index * 250)
+                })
+                if (nextCursor) window.localStorage.setItem(auditCursorKey, nextCursor)
+            }
             initializedRef.current = true
             return
         }
 
-        collections.forEach(({ key, records, title, message, tone }) => {
-            const previous = snapshotsRef.current[key] || new Set<string>()
-            const added = records.filter((record) => !previous.has(getRecordId(record, key)) && !isPayrollActivity(record))
-            added.slice(-3).forEach((record) => publish(title, message(record), tone))
-            snapshotsRef.current[key] = new Set(records.map((record) => getRecordId(record, key)))
-        })
+        if (!receivesStaffActivity(user)) {
+            collections.forEach(({ key, records, title, message, tone }) => {
+                const previous = snapshotsRef.current[key] || new Set<string>()
+                const added = records.filter((record) => !previous.has(getRecordId(record, key)) && !isPayrollActivity(record))
+                added.slice(-3).forEach((record) => publish(title, message(record), tone))
+                snapshotsRef.current[key] = new Set(records.map((record) => getRecordId(record, key)))
+            })
+        } else {
+            collections.forEach(({ key, records }) => { snapshotsRef.current[key] = new Set(records.map((record) => getRecordId(record, key))) })
+        }
 
         const previousLowStock = snapshotsRef.current.inventory || new Set<string>()
         const currentLowStock = state.inventory.filter((item) => item.closing <= (item.reorderLevel ?? 10))
@@ -267,15 +292,14 @@ export default function NotificationBell({ user }: { user: User }) {
         snapshotsRef.current.inventory = new Set(currentLowStock.map((item) => getRecordId(item, item.product)))
 
         const previousAuditLogs = snapshotsRef.current.auditLogs || new Set<string>()
-        if (!isSuperAdmin(user)) {
-            const addedAuditLogs = state.auditLogs.filter((log) => !previousAuditLogs.has(getRecordId(log, log.timestamp)))
-            addedAuditLogs.slice(-3).forEach((log) => {
-                const failed = String(log.status || '').toUpperCase() === 'FAILED' || /fail|error/i.test(`${log.action} ${log.details}`)
-                publish(failed ? 'Action failed' : 'New audit activity', getAuditMessage(log), failed ? 'error' : 'info')
-            })
-        }
+        const addedAuditLogs = state.auditLogs.filter((log) => !previousAuditLogs.has(getRecordId(log, log.timestamp)))
+        const auditAudience = receivesStaffActivity(user) ? addedAuditLogs.filter((log) => log.user !== user.name) : addedAuditLogs
+        auditAudience.slice(-8).forEach((log) => {
+            const failed = String(log.status || '').toUpperCase() === 'FAILED' || /fail|error/i.test(`${log.action} ${log.details}`)
+            publish(receivesStaffActivity(user) ? 'Staff activity' : failed ? 'Action failed' : 'New audit activity', getAuditMessage(log), failed ? 'error' : 'info')
+        })
         snapshotsRef.current.auditLogs = new Set(state.auditLogs.map((log) => getRecordId(log, log.timestamp)))
-    }, [pushEnabled, state.auditLogs, state.bankTxns, state.expenses, state.inventory, state.sales, state.staffMembers, subscriptionLoaded, user])
+    }, [auditCursorKey, pushEnabled, state.auditLogs, state.bankTxns, state.expenses, state.inventory, state.purchases, state.sales, state.staffMembers, subscriptionLoaded, user])
 
     const unreadCount = notifications.filter((item) => !item.read).length
 

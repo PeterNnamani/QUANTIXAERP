@@ -1,5 +1,5 @@
 import { getSupabaseClient } from '@/lib/supabase.browser'
-import type { AccessLevels, PermissionKey, RoleDefinition } from '@/lib/rbac'
+import { explicitAccessLevels, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
 import type { User } from '@/lib/context'
 
 export interface DatabaseUserRecord {
@@ -69,9 +69,13 @@ export async function findUserInDatabase(
         roleName: match.role_title ? String(match.role_title) : roleDefinition?.name,
         email: match.email ? String(match.email) : undefined,
         staffId: match.staff_id ? String(match.staff_id) : undefined,
-        permissions: roleDefinition?.permissions || [],
-        visibleMenus: match.access_levels ? Object.keys(match.access_levels) as PermissionKey[] : roleDefinition?.visibleMenus,
-        accessLevels: match.access_levels || undefined,
+        ...(match.access_levels && typeof match.access_levels === 'object' && !Array.isArray(match.access_levels)
+            ? menuAccessFromLevels(explicitAccessLevels(match.access_levels) || {})
+            : {
+            permissions: roleDefinition?.permissions || [],
+            visibleMenus: roleDefinition?.visibleMenus,
+            accessLevels: undefined,
+        }),
         dataScope: roleDefinition?.dataScope || 'team',
         username: match.username ? String(match.username) : undefined,
         pin: match.pin ? String(match.pin) : undefined,

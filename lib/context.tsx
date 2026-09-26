@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 import { supabase } from './supabase.browser'
 import WorkspaceLoader from '@/components/layout/workspace-loader'
-import { getDefaultRoles, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
+import { explicitAccessLevels, getDefaultRoles, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
 import { getTrialEndDate, isTrialActive, TRIAL_PLAN, type PlanName } from '@/lib/licensing'
 
 function missingSchemaColumn(error: unknown, values: Record<string, unknown>): string | null {
@@ -35,19 +35,24 @@ function enrichStoredUser(raw: any) {
   let roleDef = templates.find((r) => r.id === roleId)
   if (!roleDef) roleDef = templates.find((r) => r.id === raw.role)
 
-  const visibleMenus: PermissionKey[] = Array.isArray(raw.visibleMenus) && raw.visibleMenus.length > 0
-    ? raw.visibleMenus
-    : roleDef && Array.isArray(roleDef.visibleMenus) && roleDef.visibleMenus.length > 0
-      ? roleDef.visibleMenus
-      : roleDef && Array.isArray(roleDef.permissions)
-        ? roleDef.permissions
-        : []
+  const hasAccessMap = Boolean(raw.accessLevels) && typeof raw.accessLevels === 'object' && !Array.isArray(raw.accessLevels)
+  const savedAccess = hasAccessMap ? menuAccessFromLevels(explicitAccessLevels(raw.accessLevels) || {}) : null
+  const visibleMenus: PermissionKey[] = savedAccess
+    ? savedAccess.visibleMenus
+    : Array.isArray(raw.visibleMenus) && raw.visibleMenus.length > 0
+      ? raw.visibleMenus
+      : roleDef && Array.isArray(roleDef.visibleMenus) && roleDef.visibleMenus.length > 0
+        ? roleDef.visibleMenus
+        : roleDef && Array.isArray(roleDef.permissions)
+          ? roleDef.permissions
+          : []
 
   return {
     ...raw,
     role: raw.role,
+    permissions: savedAccess ? savedAccess.permissions : raw.permissions,
     visibleMenus,
-    accessLevels: raw.accessLevels && typeof raw.accessLevels === 'object' ? raw.accessLevels as AccessLevels : undefined,
+    accessLevels: savedAccess ? savedAccess.accessLevels : undefined,
     roleName: typeof raw.roleName === 'string' ? raw.roleName : undefined,
   }
 }
@@ -752,6 +757,19 @@ function normalizeRemoteLoanRepayments(data: any[]) {
   }))
 }
 
+function mergeRemoteRecords<T>(remote: T[], local: T[], failed: boolean, prefer: 'remote' | 'local' = 'remote', keyOf: (row: T) => string = (row) => String((row as { id?: string }).id || '')): T[] {
+  if (failed) return local
+  const key = (row: T) => keyOf(row)
+  const localByKey = new Map(local.filter((row) => key(row)).map((row) => [key(row), row]))
+  const remoteKeys = new Set(remote.map(key).filter(Boolean))
+  const localOnly = local.filter((row) => key(row) && !remoteKeys.has(key(row)))
+  if (prefer === 'local') {
+    const merged = remote.map((row) => (key(row) && localByKey.has(key(row)) ? localByKey.get(key(row))! : row))
+    return [...localOnly, ...merged]
+  }
+  return [...localOnly, ...remote]
+}
+
 function normalizeRemoteAuditLogs(data: any[]): AuditLog[] {
   return (data || []).map((item: any) => ({
     id: item.id,
@@ -873,18 +891,18 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }, prev.companySettings),
           openingCapital: Number(companyData?.settings?.openingCapital ?? prev.openingCapital),
           roles: Array.isArray(companyData?.settings?.roles) && companyData.settings.roles.length > 0 ? companyData.settings.roles : prev.roles,
-          sales: salesErr ? [] : remoteSales,
-          purchases: purchasesErr ? [] : remotePurchases,
-          expenses: expensesErr ? [] : remoteExpenses,
+          sales: mergeRemoteRecords(remoteSales, prev.sales, Boolean(salesErr)),
+          purchases: mergeRemoteRecords(remotePurchases, prev.purchases, Boolean(purchasesErr)),
+          expenses: mergeRemoteRecords(remoteExpenses, prev.expenses, Boolean(expensesErr)),
           expenseCategories: categoriesErr ? prev.expenseCategories : remoteExpenseCategories,
-          inventory: inventoryErr ? prev.inventory : remoteInventory,
-          prepayments: prepaymentsErr && prepaymentsErr.code !== 'PGRST205' ? prev.prepayments : remotePrepayments,
+          inventory: mergeRemoteRecords(remoteInventory, prev.inventory, Boolean(inventoryErr), 'local', (item) => item.sku || item.product),
+          prepayments: prepaymentsErr && prepaymentsErr.code !== 'PGRST205' ? prev.prepayments : mergeRemoteRecords(remotePrepayments, prev.prepayments, false),
           supplierList: contactsErr ? prev.supplierList : supplierList,
           customerList: contactsErr ? prev.customerList : customerList,
           loans: loansErr ? prev.loans : normalizeRemoteLoans(loansData || []),
           loanRepayments: loanRepaymentsErr ? prev.loanRepayments : normalizeRemoteLoanRepayments(loanRepaymentsData || []),
-          receivables: receivablesErr ? prev.receivables : remoteReceivables,
-          payables: payablesErr ? prev.payables : normalizeRemotePayables(payablesData || []),
+          receivables: mergeRemoteRecords(remoteReceivables, prev.receivables, Boolean(receivablesErr), 'local'),
+          payables: mergeRemoteRecords(payablesErr ? [] : normalizeRemotePayables(payablesData || []), prev.payables, Boolean(payablesErr), 'local'),
           chartOfAccounts: accountsErr ? prev.chartOfAccounts : dedupeChartOfAccounts((accountsData || []).map((account: any) => ({
             id: account.id, code: account.code, name: account.name, accountType: account.account_type,
             accountSubType: account.account_subtype, normalBalance: account.normal_balance,
@@ -900,7 +918,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             id: line.id, entryId: line.entry_id, accountId: line.account_id, debit: Number(line.debit || 0),
             credit: Number(line.credit || 0), description: line.description || '',
           })),
-          auditLogs: auditLogsErr ? prev.auditLogs : normalizeRemoteAuditLogs(auditLogsData || []),
+          auditLogs: mergeRemoteRecords(auditLogsErr ? [] : normalizeRemoteAuditLogs(auditLogsData || []), prev.auditLogs, Boolean(auditLogsErr)),
         }))
 
         if (companyData?.name && user.companyName !== companyData.name) {
@@ -947,9 +965,22 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               status: b.status || 'active',
             }
           })
-          setState((prev) => ({ ...prev, banks: banksMap, bankAccounts }))
+          setState((prev) => {
+            const localById = new Map(prev.bankAccounts.filter((account) => account.id).map((account) => [account.id, account]))
+            const remoteIds = new Set(bankAccounts.map((account) => account.id))
+            const mergedAccounts = [
+              ...prev.bankAccounts.filter((account) => account.id && !remoteIds.has(account.id)),
+              ...bankAccounts.map((account) => {
+                const local = localById.get(account.id)
+                return local ? { ...account, balance: Number(local.balance ?? account.balance) } : account
+              }),
+            ]
+            const banks = { ...prev.banks }
+            mergedAccounts.forEach((account) => { banks[account.name] = Number(account.balance || 0) })
+            return { ...prev, banks, bankAccounts: mergedAccounts }
+          })
         } else if (!banksErr) {
-          setState((prev) => ({ ...prev, banks: {}, bankAccounts: [] }))
+          setState((prev) => ({ ...prev, banks: prev.banks, bankAccounts: prev.bankAccounts }))
         }
 
         if (txnsData && txnsData.length > 0) {
@@ -967,9 +998,9 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             bank: t.bank_accounts?.name || '',
             created_at: t.created_at,
           }))
-          setState((prev) => ({ ...prev, bankTxns: normalized }))
-        } else {
-          setState((prev) => ({ ...prev, bankTxns: [] }))
+          setState((prev) => ({ ...prev, bankTxns: mergeRemoteRecords(normalized, prev.bankTxns, Boolean(txnsErr)) }))
+        } else if (!txnsErr) {
+          setState((prev) => ({ ...prev, bankTxns: prev.bankTxns }))
         }
       } catch (err) {
         console.error('Unable to load remote accounting data', err)
@@ -1657,6 +1688,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     const timestamp = new Date().toISOString()
     const module = type.split('_')[0].toUpperCase()
     const log: AuditLog = {
+      id: `AUD-${timestamp}`,
       timestamp,
       action,
       type,

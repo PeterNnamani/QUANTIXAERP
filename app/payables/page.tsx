@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
+import { displayOpenBalance, moveBankBalance, settledOpenItem } from '@/lib/open-item-payment'
 import { formatCurrency, formatNumber, triggerAppToast, makeID } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
 import PaymentModal from '@/components/modals/PaymentModal'
@@ -32,8 +33,8 @@ export default function PayablesPage() {
       invoiceDate: item.purchase_date || item.invoiceDate || '2026-07-21',
       dueDate: item.due_date || item.due || item.dueDate || '2026-07-31',
       total: item.amount || item.total || 0,
-      paid: item.amount_paid || item.amountPaid || item.paid || 0,
-      balance: item.balance_due || item.balanceDue || item.balance || Math.max((item.amount || item.total || 0) - (item.amount_paid || item.amountPaid || item.paid || 0), 0),
+      paid: item.amount_paid ?? item.amountPaid ?? item.paid ?? 0,
+      balance: displayOpenBalance(item),
       status: item.status || 'Unpaid',
       daysOverdue: item.daysOverdue || 0,
       branch: item.branch || 'Lagos',
@@ -77,29 +78,15 @@ export default function PayablesPage() {
   const handlePostPayment = (payment: { amount: number; transactionId: string; accountId: string; accountName: string; paymentMethod: string; date: string; note: string }) => {
     const paymentItem = payables.find((item) => item.id === payment.transactionId) || selectedItem
     const paymentAmount = Math.min(payment.amount, paymentItem?.balance || 0)
-    const nextBalance = Math.max(0, (paymentItem?.balance || 0) - paymentAmount)
     const bankName = payment.accountName || 'Cash / Other'
-    const updatedPayables = state.payables.flatMap((p) => {
-      if (p.id !== paymentItem?.id) return [p]
-      if (nextBalance <= 0) return []
-      const paid = (p.amount_paid || p.amountPaid || p.paid || 0) + paymentAmount
-      return [{
-        ...p,
-        balanceDue: nextBalance,
-        balance_due: nextBalance,
-        amountPaid: paid,
-        amount_paid: paid,
-        status: 'Partially Paid',
-      }]
-    })
+    const updatedPayables = state.payables.map((record) => record.id === paymentItem?.id ? settledOpenItem(record, paymentAmount) : record)
     const updatedPurchases = state.purchases.map((purchase) => {
-      if (purchase.id !== paymentItem?.id && purchase.reference !== paymentItem?.purchaseRef) return purchase
+      if (purchase.id !== paymentItem?.id && purchase.id !== paymentItem?.purchaseRef) return purchase
       const amountPaid = Number(purchase.amountPaid || 0) + paymentAmount
       const balance = Math.max(0, Number(purchase.total || 0) - amountPaid)
       return { ...purchase, amountPaid, balance, paymentStatus: balance === 0 ? 'PAID' : 'PARTIAL' }
     })
-    const updatedBanks = { ...state.banks }
-    updatedBanks[bankName] = Math.max(0, (updatedBanks[bankName] ?? 0) - paymentAmount)
+    const movedCash = moveBankBalance(state.bankAccounts, state.banks, payment.accountId, bankName, -paymentAmount)
 
     const bankTxn = {
       id: makeID('TXN'),
@@ -114,15 +101,11 @@ export default function PayablesPage() {
       type: 'Withdrawal',
       bank: bankName,
     }
-    const updatedBankAccounts = payment.accountId
-      ? state.bankAccounts.map((account) => account.id === payment.accountId ? { ...account, balance: Math.max(0, Number(account.balance || 0) - paymentAmount) } : account)
-      : state.bankAccounts
-
     updateState({
       payables: updatedPayables,
       purchases: updatedPurchases,
-      banks: updatedBanks,
-      bankAccounts: updatedBankAccounts,
+      banks: movedCash.banks,
+      bankAccounts: movedCash.bankAccounts,
       bankTxns: [bankTxn, ...state.bankTxns],
     })
     addAuditLog('PAYMENT', 'PAYABLES', paymentItem?.id || 'BILL-000', `Supplier payment posted to accounts payable${payment.note ? `: ${payment.note}` : '.'}`)

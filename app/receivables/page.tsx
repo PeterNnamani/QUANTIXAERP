@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
+import { displayOpenBalance, moveBankBalance, settledOpenItem } from '@/lib/open-item-payment'
 import { formatCurrency, formatNumber, triggerAppToast, makeID } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
 import PaymentModal from '@/components/modals/PaymentModal'
@@ -32,8 +33,8 @@ export default function ReceivablesPage() {
       invoiceDate: item.invoiceDate || '2026-07-21',
       dueDate: item.due || item.dueDate || '2026-07-31',
       total: item.amount || item.total || 0,
-      paid: item.amountPaid || item.paid || 0,
-      balance: item.balanceDue || item.balance || Math.max((item.amount || item.total || 0) - (item.amountPaid || item.paid || 0), 0),
+      paid: item.amountPaid ?? item.amount_paid ?? item.paid ?? 0,
+      balance: displayOpenBalance(item),
       status: item.status || 'Unpaid',
       daysOverdue: item.daysOverdue || 0,
       rep: item.rep || 'Peter',
@@ -80,29 +81,16 @@ export default function ReceivablesPage() {
   const handlePostPayment = (payment: { amount: number; transactionId: string; accountId: string; accountName: string; paymentMethod: string; date: string; note: string }) => {
     const paymentItem = receivables.find((item) => item.id === payment.transactionId) || selectedItem
     const paymentAmount = Math.min(payment.amount, paymentItem?.balance || 0)
-    const nextBalance = Math.max(0, (paymentItem?.balance || 0) - paymentAmount)
     const bankName = payment.accountName || 'Cash / Other'
-    const updatedReceivables = state.receivables.flatMap((r) => {
-      if (r.id !== paymentItem?.id) return [r]
-      if (nextBalance <= 0) return []
-      const paid = (r.amount_paid || r.amountPaid || r.paid || 0) + paymentAmount
-      return [{
-        ...r,
-        balanceDue: nextBalance,
-        balance_due: nextBalance,
-        amountPaid: paid,
-        amount_paid: paid,
-        status: 'Partially Paid',
-      }]
-    })
+    const updatedReceivables = state.receivables.map((record) => record.id === paymentItem?.id ? settledOpenItem(record, paymentAmount) : record)
+    const source = state.receivables.find((record) => record.id === paymentItem?.id)
     const updatedSales = state.sales.map((sale) => {
-      if (sale.id !== paymentItem?.sourceSaleId && sale.reference !== paymentItem?.invoice) return sale
+      if (sale.id !== source?.sourceSaleId && sale.id !== source?.invoice && sale.id !== paymentItem?.invoice) return sale
       const amountPaid = Number(sale.amountPaid || 0) + paymentAmount
       const balance = Math.max(0, Number(sale.totalAmount || 0) - amountPaid)
       return { ...sale, amountPaid, balance, paymentStatus: balance === 0 ? 'PAID' : 'CREDIT' }
     })
-    const updatedBanks = { ...state.banks }
-    updatedBanks[bankName] = (updatedBanks[bankName] ?? 0) + paymentAmount
+    const movedCash = moveBankBalance(state.bankAccounts, state.banks, payment.accountId, bankName, paymentAmount)
 
     const bankTxn = {
       id: makeID('TXN'),
@@ -117,15 +105,11 @@ export default function ReceivablesPage() {
       type: 'Deposit',
       bank: bankName,
     }
-    const updatedBankAccounts = payment.accountId
-      ? state.bankAccounts.map((account) => account.id === payment.accountId ? { ...account, balance: Number(account.balance || 0) + paymentAmount } : account)
-      : state.bankAccounts
-
     updateState({
       receivables: updatedReceivables,
       sales: updatedSales,
-      banks: updatedBanks,
-      bankAccounts: updatedBankAccounts,
+      banks: movedCash.banks,
+      bankAccounts: movedCash.bankAccounts,
       bankTxns: [bankTxn, ...state.bankTxns],
     })
     addAuditLog('PAYMENT', 'RECEIVABLES', paymentItem?.id || 'AR-000', `Customer payment posted to accounts receivable${payment.note ? `: ${payment.note}` : '.'}`)

@@ -4,7 +4,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { ReactNode, useState } from 'react'
 import { useAccounting } from '@/lib/context'
 import { planCanAccessRoute } from '@/lib/licensing'
-import { canAccessRoute, getVisibleNavigationItems } from '@/lib/rbac'
+import { canAccessRoute, getVisibleNavigationItems, hasExplicitMenuGrant } from '@/lib/rbac'
 import { triggerAppToast } from '@/lib/utils'
 
 interface NavItem {
@@ -274,7 +274,7 @@ export default function Navigation({ userRole, isOpen, onNavigate }: { userRole:
   const isStaffMenuOpen = staffMenuOpen || pathname.startsWith('/staff-management') || pathname.startsWith('/payroll')
 
   const visibleItems = getVisibleNavigationItems(user)
-    .filter((item) => item.href === '/subscription-and-licensing' || planCanAccessRoute(user?.subscriptionPlan, item.href, user?.subscriptionStatus))
+    .filter((item) => item.href === '/subscription-and-licensing' || planCanAccessRoute(user?.subscriptionPlan, item.href, user?.subscriptionStatus) || hasExplicitMenuGrant(user, item.permission) || (item.permission === 'ledger' && hasExplicitMenuGrant(user, 'accounting')))
     .map((item) => ({
       ...item,
       href: item.href,

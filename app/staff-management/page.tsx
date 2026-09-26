@@ -5,7 +5,7 @@ import { Eye, EyeOff, Pencil, Lock, Unlock, Trash2, Search, Users, ThumbsUp, Che
 import AppLayout from '@/components/layout/app-layout'
 import BulkImport from '@/components/bulk-import'
 import { useAccounting } from '@/lib/context'
-import { generatePin, generateStaffId, saveRoles, type AccessLevels, type PermissionKey, type RoleDefinition, type StaffMemberRecord } from '@/lib/rbac'
+import { generatePin, generateStaffId, savedMenuAccess, saveRoles, type AccessLevels, type PermissionKey, type RoleDefinition, type StaffMemberRecord } from '@/lib/rbac'
 import { saveUserToDatabase } from '@/lib/user-db'
 import { getSupabaseClient } from '@/lib/supabase.browser'
 import { seatLimitForSubscription } from '@/lib/licensing'
@@ -286,7 +286,7 @@ export default function StaffManagementPage() {
     setUsername(staff.username || '')
     setRoleId(staff.roleId)
     setRoleTitle(staff.roleName)
-    setAccessLevels(staff.accessLevels || getRoleAccessLevels(roles.find((role) => role.id === staff.roleId)))
+    setAccessLevels(savedMenuAccess({ ...staff, role: staff.roleId })?.accessLevels || getRoleAccessLevels(roles.find((role) => role.id === staff.roleId)))
     setStatus(staff.status)
     setDrawerOpen(true)
   }
@@ -299,6 +299,7 @@ export default function StaffManagementPage() {
       return
     }
     setDrawerMode('add')
+    setAccessLevels(getRoleAccessLevels(roles.find((role) => role.id === roleId)))
     setDrawerOpen(true)
   }
 

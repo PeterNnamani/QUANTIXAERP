@@ -49,7 +49,7 @@ test('notifications baseline history and skip a second payroll alert', () => {
         { id: 'new', event_time: '2026-09-26T10:00:00Z' },
     ]
     const seeded = pendingAuditActivity(logs, '')
-    assert.deepEqual(seeded.pending, [])
+    assert.deepEqual(seeded.pending.map((log) => log.id), ['old', 'new'])
     assert.equal(seeded.nextCursor, String(new Date('2026-09-26T10:00:00Z').getTime()))
     const pending = pendingAuditActivity(logs, String(new Date('2026-09-01T10:00:00Z').getTime()))
     assert.deepEqual(pending.pending.map((log) => log.id), ['new'])

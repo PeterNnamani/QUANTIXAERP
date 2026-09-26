@@ -139,7 +139,7 @@ export default function ExpensesPage() {
             type: 'Withdrawal',
             bank: expense.bank,
         }]
-        updateState({ expenses: [...state.expenses, expense], banks: updatedBanks, bankAccounts: updatedBankAccounts, bankTxns: [...paymentTxn, ...state.bankTxns] })
+        updateState({ expenses: [expense, ...state.expenses], banks: updatedBanks, bankAccounts: updatedBankAccounts, bankTxns: [...paymentTxn, ...state.bankTxns] })
         addAuditLog('CREATE', 'EXPENSE', expense.id, `${expense.category} expense recorded: ${formatCurrency(expense.amount)}`)
         setSelectedId(expense.id)
         setShowForm(false)
