@@ -5086,7 +5086,7 @@ html[data-theme='dark'] .topbar {
   background: #1f4bdb;
 }
 
-.auth-hero .auth-card .btn {
+.auth-hero .auth-card .btn:not(.btn-primary) {
   color: #102144;
   background: transparent;
   border: 1px solid rgba(31, 60, 122, 0.14);
@@ -5096,7 +5096,7 @@ html[data-theme='dark'] .topbar {
   transition: background 160ms ease, border-color 160ms ease;
 }
 
-.auth-hero .auth-card .btn:hover {
+.auth-hero .auth-card .btn:not(.btn-primary):hover {
   background: rgba(43, 93, 255, 0.06);
   border-color: rgba(43, 93, 255, 0.24);
 }
@@ -5165,8 +5165,8 @@ html[data-theme='dark'] label {
   color: var(--text2);
 }
 
-html[data-theme='dark'] .btn,
-html[data-theme='dark'] button:not(.link) {
+html[data-theme='dark'] .btn:not(.btn-primary):not(.btn-success):not(.btn-danger):not(.btn-amber),
+html[data-theme='dark'] button:not(.link):not(.btn-primary):not(.btn-success):not(.btn-danger):not(.btn-amber) {
   color: var(--text);
 }
 
@@ -5222,7 +5222,9 @@ html[data-theme='dark'] .auth-hero .auth-card .fg input:focus {
 }
 
 html[data-theme='dark'] .auth-hero .auth-card .btn-primary {
+  background: #6d8cff;
   color: #ffffff;
+  border: none;
 }
 
 html[data-theme='dark'] .auth-hero .auth-card .btn:not(.btn-primary) {
