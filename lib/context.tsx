@@ -5,6 +5,7 @@ import { supabase } from './supabase.browser'
 import WorkspaceLoader from '@/components/layout/workspace-loader'
 import { explicitAccessLevels, getDefaultRoles, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
 import { getTrialEndDate, isTrialActive, TRIAL_PLAN, type PlanName } from '@/lib/licensing'
+import { ACTIVITY_KEY, ACTIVITY_POLL_MS, ACTIVITY_WRITE_THROTTLE_MS, isSessionExpired, resolveSessionTimeoutMs } from '@/lib/session'
 
 function missingSchemaColumn(error: unknown, values: Record<string, unknown>): string | null {
   if (typeof error !== 'object' || error === null || (error as { code?: string }).code !== 'PGRST204') return null
@@ -427,7 +428,6 @@ const STORAGE_KEY = 'hw_accounting_data'
 const AUTH_KEY = 'hw_auth_user'
 const ONBOARDING_COMPLETED_KEY = 'quantixa_onboarding_completed'
 const LOGIN_NOTIFICATION_KEY = 'quantixa_login_notification'
-const INACTIVITY_TIMEOUT_MS = 2 * 60 * 1000
 const REMEMBER_USERNAME_KEY = 'hw_remembered_username'
 
 const defaultState: AppState = {
@@ -1617,6 +1617,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
     const storage = remember ? localStorage : sessionStorage
     storage.setItem(AUTH_KEY, JSON.stringify(enriched))
+    localStorage.setItem(ACTIVITY_KEY, String(Date.now()))
     if (supabase && enriched.companyId) {
       void supabase.from('audit_logs').insert({
         company_id: enriched.companyId,
@@ -1668,27 +1669,74 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(ONBOARDING_COMPLETED_KEY, 'true')
     localStorage.removeItem(AUTH_KEY)
     sessionStorage.removeItem(AUTH_KEY)
+    localStorage.removeItem(ACTIVITY_KEY)
     window.location.href = '/'
   }
 
+  const sessionTimeoutMs = resolveSessionTimeoutMs(
+    state.companySettings?.security?.sessionTimeout,
+    user?.userSettings?.sessionTimeout,
+  )
+  // Read through refs so a settings change or a re-rendered user object does not
+  // tear down and re-arm the idle watcher.
+  const sessionTimeoutRef = useRef(sessionTimeoutMs)
+  sessionTimeoutRef.current = sessionTimeoutMs
+  const logoutRef = useRef(logout)
+  logoutRef.current = logout
+  const isSignedIn = Boolean(user)
+
   useEffect(() => {
-    if (!user) return
+    if (!isSignedIn) return
 
-    let timeoutId: ReturnType<typeof setTimeout>
-    const resetInactivityTimer = () => {
-      clearTimeout(timeoutId)
-      timeoutId = setTimeout(logout, INACTIVITY_TIMEOUT_MS)
+    let lastActivityAt = Date.now()
+    let lastWriteAt = 0
+
+    const recordActivity = (force = false) => {
+      const now = Date.now()
+      lastActivityAt = now
+      if (!force && now - lastWriteAt < ACTIVITY_WRITE_THROTTLE_MS) return
+      lastWriteAt = now
+      try {
+        localStorage.setItem(ACTIVITY_KEY, String(now))
+      } catch {
+        // Storage can be unavailable (private mode, quota). The in-memory
+        // timestamp still keeps this tab's timeout accurate.
+      }
     }
-    const activityEvents: Array<keyof WindowEventMap> = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll']
 
-    activityEvents.forEach((eventName) => window.addEventListener(eventName, resetInactivityTimer, { passive: true }))
-    resetInactivityTimer()
+    // Every tab in use refreshes the shared timestamp, so the most recent
+    // activity in any tab keeps the session alive in all of them.
+    const readLastActivity = () => {
+      try {
+        const shared = Number(localStorage.getItem(ACTIVITY_KEY))
+        if (Number.isFinite(shared) && shared > 0) return Math.max(shared, lastActivityAt)
+      } catch {
+        // Ignore and fall back to this tab's own timestamp.
+      }
+      return lastActivityAt
+    }
+
+    const enforceIdleTimeout = () => {
+      if (isSessionExpired(readLastActivity(), Date.now(), sessionTimeoutRef.current)) logoutRef.current()
+    }
+
+    const onActivity = () => recordActivity()
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') enforceIdleTimeout()
+    }
+    const activityEvents: Array<keyof WindowEventMap> = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'touchmove', 'wheel', 'scroll']
+
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, onActivity, { passive: true }))
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    recordActivity(true)
+    const intervalId = setInterval(enforceIdleTimeout, ACTIVITY_POLL_MS)
 
     return () => {
-      clearTimeout(timeoutId)
-      activityEvents.forEach((eventName) => window.removeEventListener(eventName, resetInactivityTimer))
+      clearInterval(intervalId)
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, onActivity))
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [user])
+  }, [isSignedIn])
 
   const resetCompanyBooks = () => {
     remoteLoadToken.current += 1
