@@ -58,18 +58,14 @@ export default function LoginPage() {
     const matchedStaff = findStaffMemberByLogin(state.staffMembers, normalizedUsername, normalizedPin)
     const databaseResult = await loginWithCredentials(normalizedUsername, normalizedPin)
     const databaseUser = databaseResult.user
-
-    // Validate credentials against database or staff members
-    const localAccess = matchedStaff ? savedMenuAccess({ ...matchedStaff, role: matchedStaff.roleId }) : null
-    const databaseAccess = databaseUser && databaseUser.accessLevels !== undefined
-        ? savedMenuAccess({ accessLevels: databaseUser.accessLevels, role: databaseUser.role })
-        : null
-    const menuAccess = localAccess || databaseAccess
+    const localAccess = matchedStaff && typeof savedMenuAccess === 'function'
+      ? savedMenuAccess({ ...matchedStaff, role: matchedStaff.roleId })
+      : null
 
     if (databaseUser) {
       await recordUserLogin(databaseUser)
       saveRememberedUsername(rememberMe)
-      login(menuAccess ? { ...databaseUser, ...menuAccess } : databaseUser, rememberMe)
+      login(databaseUser, rememberMe)
       setIsLoading(false)
       router.push('/dashboard')
     } else if (matchedStaff) {
@@ -80,9 +76,9 @@ export default function LoginPage() {
         roleId: matchedStaff.roleId,
         roleName: matchedStaff.roleName,
         staffId: matchedStaff.staffId,
-        permissions: menuAccess?.permissions || matchedStaff.permissions,
-        visibleMenus: menuAccess?.visibleMenus || matchedStaff.visibleMenus,
-        accessLevels: menuAccess?.accessLevels || matchedStaff.accessLevels,
+        permissions: localAccess?.permissions || matchedStaff.permissions,
+        visibleMenus: localAccess?.visibleMenus || matchedStaff.visibleMenus,
+        accessLevels: localAccess?.accessLevels || matchedStaff.accessLevels,
         dataScope: matchedStaff.dataScope,
       }, rememberMe)
       setIsLoading(false)

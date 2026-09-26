@@ -1,3 +1,5 @@
+import { explicitAccessLevels, menuAccessFromLevels, type AccessLevel, type AccessLevels } from './access-levels'
+
 export type PermissionKey =
     | 'dashboard'
     | 'sales'
@@ -25,8 +27,8 @@ export type PermissionKey =
     | 'admin'
     | 'settings'
 
-export type AccessLevel = 'view' | 'edit'
-export type AccessLevels = Partial<Record<PermissionKey, AccessLevel>>
+export type { AccessLevel, AccessLevels } from './access-levels'
+export { explicitAccessLevels, menuAccessFromLevels }
 
 export interface RoleDefinition {
     id: string
@@ -252,24 +254,6 @@ function getRolePermissions(user: Pick<UserWithRole, 'role' | 'permissions'> | n
     if (!user) return []
     if (user.permissions && user.permissions.length > 0) return user.permissions as PermissionKey[]
     return DEFAULT_ROLE_PERMISSIONS[user.role] || []
-}
-
-export function explicitAccessLevels(accessLevels: AccessLevels | null | undefined): AccessLevels | null {
-    if (!accessLevels || typeof accessLevels !== 'object') return null
-    const explicit: AccessLevels = {}
-    Object.entries(accessLevels).forEach(([key, level]) => {
-        if (level === 'view' || level === 'edit') explicit[key as PermissionKey] = level
-    })
-    return Object.keys(explicit).length > 0 ? explicit : null
-}
-
-export function menuAccessFromLevels(accessLevels: AccessLevels): { accessLevels: AccessLevels; visibleMenus: PermissionKey[]; permissions: PermissionKey[] } {
-    const visibleMenus = Object.keys(accessLevels) as PermissionKey[]
-    return {
-        accessLevels,
-        visibleMenus,
-        permissions: visibleMenus.filter((key) => accessLevels[key] === 'edit'),
-    }
 }
 
 function roleTemplateAccess(role: string | undefined): AccessLevels {

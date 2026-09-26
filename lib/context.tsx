@@ -3,7 +3,8 @@
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 import { supabase } from './supabase.browser'
 import WorkspaceLoader from '@/components/layout/workspace-loader'
-import { explicitAccessLevels, getDefaultRoles, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
+import { explicitAccessLevels, menuAccessFromLevels } from '@/lib/access-levels'
+import { getDefaultRoles, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
 import { getTrialEndDate, isTrialActive, TRIAL_PLAN, type PlanName } from '@/lib/licensing'
 
 function missingSchemaColumn(error: unknown, values: Record<string, unknown>): string | null {

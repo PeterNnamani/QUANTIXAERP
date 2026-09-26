@@ -1,23 +1,22 @@
 import { type RoleDefinition } from '@/lib/rbac'
-import type { User } from '@/lib/context'
 import type { AuthSessionUser } from '@/lib/auth-user'
 
 export type { DatabaseUserRecord } from '@/lib/auth-user'
 
-function asUser(user: AuthSessionUser | null | undefined): User | null {
-    return user ? user as User : null
+function asUser(user: AuthSessionUser | null | undefined): AuthSessionUser | null {
+    return user || null
 }
 
 export async function findUserInDatabase(
     staffIdOrUsername: string,
     pin: string,
     _roles?: RoleDefinition[],
-): Promise<User | null> {
+): Promise<AuthSessionUser | null> {
     const result = await loginWithCredentials(staffIdOrUsername, pin)
     return result.user
 }
 
-export async function loginWithCredentials(staffIdOrUsername: string, pin: string): Promise<{ user: User | null; error?: string }> {
+export async function loginWithCredentials(staffIdOrUsername: string, pin: string): Promise<{ user: AuthSessionUser | null; error?: string }> {
     try {
         const response = await fetch('/api/auth/login', {
             method: 'POST',
@@ -45,7 +44,7 @@ export async function loginWithCredentials(staffIdOrUsername: string, pin: strin
     }
 }
 
-export async function recordUserLogin(user: Pick<User, 'companyId' | 'staffId' | 'username'>) {
+export async function recordUserLogin(user: Pick<AuthSessionUser, 'companyId' | 'staffId' | 'username'>) {
     if (!user.companyId || (!user.staffId && !user.username)) return
 
     try {
@@ -71,7 +70,7 @@ export async function saveUserToDatabase(payload: {
     fullName: string
     roleId: string
     roleTitle?: string
-    accessLevels?: User['accessLevels']
+    accessLevels?: AuthSessionUser['accessLevels']
     email?: string
     phone?: string
     branch?: string

@@ -5,6 +5,11 @@ const {
     credentialsMatch,
     findMatchingUser,
 } = await import('../lib/auth-credentials.ts')
+const {
+    explicitAccessLevels,
+    menuAccessFromLevels,
+} = await import('../lib/access-levels.ts')
+const rbacModule = await import('../lib/rbac.mjs')
 
 const ownerRow = {
     company_id: 'company-1',
@@ -20,6 +25,20 @@ test('login matches username or staff ID without caring about case', () => {
     assert.equal(credentialsMatch(ownerRow, 'STF-1001', '1234'), true)
     assert.equal(credentialsMatch(ownerRow, 'owneradmin', '0000'), false)
     assert.equal(credentialsMatch({ ...ownerRow, status: 'disabled' }, 'owneradmin', '1234'), false)
+})
+
+test('the rbac module used by login exposes access helpers as functions', () => {
+    assert.equal(typeof rbacModule.explicitAccessLevels, 'function')
+    assert.equal(typeof rbacModule.menuAccessFromLevels, 'function')
+    assert.equal(typeof rbacModule.savedMenuAccess, 'function')
+})
+
+test('explicit access maps stay callable after login', () => {
+    const levels = explicitAccessLevels({ dashboard: 'edit', sales: 'view', junk: 'nope' })
+    const access = menuAccessFromLevels(levels || {})
+    assert.deepEqual(levels, { dashboard: 'edit', sales: 'view' })
+    assert.deepEqual(access.visibleMenus, ['dashboard', 'sales'])
+    assert.deepEqual(access.permissions, ['dashboard'])
 })
 
 test('the newest matching company account wins when credentials collide', () => {

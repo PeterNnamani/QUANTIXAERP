@@ -1,4 +1,5 @@
-import { explicitAccessLevels, getDefaultRoles, menuAccessFromLevels, type AccessLevels, type RoleDefinition } from '@/lib/rbac'
+import { explicitAccessLevels, menuAccessFromLevels, type AccessLevels } from '@/lib/access-levels'
+import { getDefaultRoles, type RoleDefinition } from '@/lib/rbac'
 import { normalizePlanName, type PlanName } from '@/lib/licensing'
 import { type LoginIdentityRecord } from '@/lib/auth-credentials'
 
