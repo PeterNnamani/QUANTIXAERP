@@ -64,6 +64,7 @@ import { setExportCompanyName } from '@/lib/export-utils'
 import { wipedCompanyBooks } from '@/lib/company-lifecycle'
 import { mergeReceivablesFromSales } from '@/lib/receivables'
 import { bankTxnKey, businessReference, isUuid, isoDate, selectUnpostedJournals, shouldPostExpenseCash, subledgerReference } from '@/lib/accounting/sync'
+import { dedupeBankAccounts, mergeLoadedBankAccounts, planBankWrites, planProductWrites } from '@/lib/record-upsert'
 import { capitalOpeningAmount, normalizeOpeningDate, persistChartOpeningBalances, reconcileCapitalOpening } from '@/lib/accounting/opening-balances'
 
 export interface User {
@@ -981,15 +982,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             }
           })
           setState((prev) => {
-            const localById = new Map(prev.bankAccounts.filter((account) => account.id).map((account) => [account.id, account]))
-            const remoteIds = new Set(bankAccounts.map((account) => account.id))
-            const mergedAccounts = [
-              ...prev.bankAccounts.filter((account) => account.id && !remoteIds.has(account.id)),
-              ...bankAccounts.map((account) => {
-                const local = localById.get(account.id)
-                return local ? { ...account, balance: Number(local.balance ?? account.balance) } : account
-              }),
-            ]
+            const mergedAccounts = mergeLoadedBankAccounts(prev.bankAccounts, bankAccounts)
             const banks = { ...prev.banks }
             mergedAccounts.forEach((account) => { banks[account.name] = Number(account.balance || 0) })
             return { ...prev, banks, bankAccounts: mergedAccounts }
@@ -1086,9 +1079,11 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   const updateState = (updates: Partial<AppState>, options: { persist?: boolean } = {}) => {
     const companyId = user?.companyId
     setState((prev) => {
-      const normalizedUpdates = updates.inventory
-        ? { ...updates, inventory: normalizeInventorySkus(updates.inventory) }
-        : updates
+      const normalizedUpdates = {
+        ...updates,
+        ...(updates.inventory ? { inventory: normalizeInventorySkus(updates.inventory) } : {}),
+        ...(updates.bankAccounts ? { bankAccounts: dedupeBankAccounts(updates.bankAccounts) } : {}),
+      }
       const newState = { ...prev, ...normalizedUpdates }
       if (companyId) {
         localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(newState))
@@ -1290,7 +1285,15 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.inventory) {
-            const inventoryRows = (normalizedUpdates.inventory as InventoryItem[]).map((item) => ({
+            const { data: existingProducts, error: existingProductsErr } = await supabase.from('products').select('id,sku,name').eq('company_id', companyId)
+            if (existingProductsErr) throw existingProductsErr
+            const productWrites = planProductWrites(existingProducts || [], normalizedUpdates.inventory as InventoryItem[])
+            for (const write of productWrites) {
+              if (!write.renameFromId || !write.item.sku) continue
+              const { error: renameErr } = await supabase.from('products').update({ sku: write.item.sku, updated_at: new Date().toISOString() }).eq('id', write.renameFromId).eq('company_id', companyId)
+              if (renameErr) throw renameErr
+            }
+            const inventoryRows = productWrites.map(({ item }) => ({
               company_id: companyId,
               sku: item.sku,
               name: item.product,
@@ -1548,7 +1551,10 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.bankAccounts) {
-            const bankRows = (normalizedUpdates.bankAccounts as BankAccount[]).map((account) => ({
+            const { data: existingBanks, error: existingBanksErr } = await supabase.from('bank_accounts').select('id,name').eq('company_id', companyId)
+            if (existingBanksErr) throw existingBanksErr
+            const plannedBanks = planBankWrites(existingBanks || [], normalizedUpdates.bankAccounts as BankAccount[])
+            const bankRows = plannedBanks.accounts.map((account) => ({
               id: account.id,
               company_id: companyId,
               name: account.name,
@@ -1560,11 +1566,22 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               opening_balance: account.openingBalance,
               opening_balance_date: account.openingBalanceDate || null,
               balance: account.balance,
-              status: account.status.toLowerCase(),
+              status: String(account.status || 'active').toLowerCase(),
               updated_at: new Date().toISOString(),
             }))
             const { error: bankAccountsPersistErr } = await supabase.from('bank_accounts').upsert(bankRows, { onConflict: 'id' })
             if (bankAccountsPersistErr) throw bankAccountsPersistErr
+            const bankIdMap = plannedBanks.idMap as Record<string, string>
+            if (Object.keys(bankIdMap).length > 0) {
+              setState((current) => {
+                const nextAccounts = dedupeBankAccounts(current.bankAccounts.map((account) => (
+                  bankIdMap[account.id] ? { ...account, id: bankIdMap[account.id] } : account
+                )))
+                const next = { ...current, bankAccounts: nextAccounts }
+                localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(next))
+                return next
+              })
+            }
           }
 
           if (normalizedUpdates.bankTxns) {

@@ -6,6 +6,7 @@ import AppLayout from '@/components/layout/app-layout'
 import BulkImport from '@/components/bulk-import'
 import { useAccounting } from '@/lib/context'
 import { generatePin, generateStaffId, savedMenuAccess, saveRoles, type AccessLevels, type PermissionKey, type RoleDefinition, type StaffMemberRecord } from '@/lib/rbac'
+import { replaceRole } from '@/lib/record-upsert'
 import { saveUserToDatabase } from '@/lib/user-db'
 import { getSupabaseClient } from '@/lib/supabase.browser'
 import { seatLimitForSubscription } from '@/lib/licensing'
@@ -124,11 +125,6 @@ export default function StaffManagementPage() {
       return
     }
 
-    if (roles.some((role) => role.id === id)) {
-      setInlineNotice({ message: 'A role with that name already exists.', tone: 'error' })
-      return
-    }
-
     const newRole: RoleDefinition = {
       id,
       name: roleName,
@@ -139,17 +135,17 @@ export default function StaffManagementPage() {
       template: roleTemplate,
     }
 
-    const nextRoles = [...roles, newRole]
-    setRoles(nextRoles)
-    updateState({ roles: nextRoles })
-    saveRoles(nextRoles)
-    setSelectedRoleId(newRole.id)
+    const saved = replaceRole(roles, newRole)
+    setRoles(saved.roles)
+    updateState({ roles: saved.roles })
+    saveRoles(saved.roles)
+    setSelectedRoleId(saved.roles.find((role: RoleDefinition) => role.name === roleName)?.id || newRole.id)
     setRoleName('New Role')
     setRoleDescription('Custom role for staff access')
     setRoleTemplate('Custom')
     setRolePermissions(['dashboard'])
     setRoleDataScope('team')
-    setInlineNotice({ message: `Created role ${newRole.name}`, tone: 'success' })
+    setInlineNotice({ message: saved.updated ? `Updated role ${roleName}` : `Created role ${roleName}`, tone: 'success' })
   }
 
   const resetForm = () => {

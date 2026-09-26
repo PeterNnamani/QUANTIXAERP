@@ -10,6 +10,7 @@ import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipeConfirmationPhrase } from '
 import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
 import { requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
 import { capitalOpeningAmount, mergeOpeningBalances, reconcileCapitalOpening } from '@/lib/accounting/opening-balances'
+import { applyBankAccountSave, replaceRole } from '@/lib/record-upsert'
 
 const sidebarSections = [
   { id: 'company', label: 'Company', description: 'Profile, branding, and legal details' },
@@ -62,6 +63,7 @@ export default function SettingsPage() {
   const [newBankOpeningBalance, setNewBankOpeningBalance] = useState(0)
   const [newBankOpeningDate, setNewBankOpeningDate] = useState(new Date().toISOString().slice(0, 10))
   const [bankCreationStatus, setBankCreationStatus] = useState('')
+  const [editingBankId, setEditingBankId] = useState('')
   const [settingsNotice, setSettingsNotice] = useState<{ tone: 'error' | 'success'; message: string } | null>(null)
   const [wipeConfirm, setWipeConfirm] = useState('')
   const [closeConfirm, setCloseConfirm] = useState('')
@@ -339,11 +341,11 @@ export default function SettingsPage() {
       dataScope: 'team',
       template: roleTemplate,
     }
-    const nextRoles = [...roles, nextRole]
-    setRoles(nextRoles)
-    updateState({ roles: nextRoles, companySettings: { ...companySettings, roles: nextRoles } })
-    saveRoles(nextRoles)
-    setSettingsNotice({ tone: 'success', message: `Role ${roleName} created.` })
+    const saved = replaceRole(roles, nextRole)
+    setRoles(saved.roles)
+    updateState({ roles: saved.roles, companySettings: { ...companySettings, roles: saved.roles } })
+    saveRoles(saved.roles)
+    setSettingsNotice({ tone: 'success', message: saved.updated ? `Role ${saved.roles.find((role: RoleDefinition) => role.id === nextRole.id || role.name === roleName)?.name || roleName} updated.` : `Role ${roleName} created.` })
   }
 
   const clearCompanyStorage = () => {
@@ -411,6 +413,32 @@ export default function SettingsPage() {
     }
   }
 
+  const resetBankForm = () => {
+    setEditingBankId('')
+    setNewBankName('')
+    setNewBankAccountName('')
+    setNewBankAccountNumber('')
+    setNewBankAccountType('Current')
+    setNewBankCurrency('NGN')
+    setNewBankOpeningBalance(0)
+    setNewBankOpeningDate(new Date().toISOString().slice(0, 10))
+  }
+
+  const startEditBank = (account: BankAccount) => {
+    const prefix = account.institution ? `${account.institution} — ` : ''
+    const accountName = prefix && account.name.startsWith(prefix) ? account.name.slice(prefix.length) : account.name
+    setEditingBankId(account.id)
+    setNewBankName(account.institution || account.name)
+    setNewBankAccountName(accountName)
+    setNewBankAccountNumber(account.accountNumber || '')
+    setNewBankAccountType(account.accountType || 'Current')
+    setNewBankCurrency(account.currency || 'NGN')
+    setNewBankOpeningBalance(Number(account.openingBalance || 0))
+    setNewBankOpeningDate(account.openingBalanceDate || new Date().toISOString().slice(0, 10))
+    setBankCreationStatus('')
+    setActiveSection('banks')
+  }
+
   const handleCreateBank = () => {
     const institution = newBankName.trim()
     const accountName = newBankAccountName.trim()
@@ -419,21 +447,30 @@ export default function SettingsPage() {
       return
     }
     const accountKey = `${institution} — ${accountName}`
-    if (state.bankAccounts.some((account) => account.name === accountKey) || state.banks[accountKey] !== undefined) {
-      setBankCreationStatus('This bank account already exists.')
+    const saved = applyBankAccountSave(state, {
+      editingId: editingBankId,
+      name: accountKey,
+      institution,
+      accountNumber: newBankAccountNumber.trim(),
+      accountType: newBankAccountType,
+      currency: newBankCurrency,
+      openingBalance: newBankOpeningBalance,
+      openingBalanceDate: newBankOpeningDate,
+      status: 'active',
+    })
+    if (saved.conflict || !saved.account) {
+      setBankCreationStatus('Another bank account already uses this name.')
       return
     }
-    const account: BankAccount = {
-      id: crypto.randomUUID(), name: accountKey, institution,
-      accountNumber: newBankAccountNumber.trim(), accountType: newBankAccountType,
-      currency: newBankCurrency, branch: '', openingBalance: newBankOpeningBalance,
-      openingBalanceDate: newBankOpeningDate, balance: newBankOpeningBalance, status: 'active',
-    }
-    updateState({ banks: { ...state.banks, [account.name]: account.balance }, bankAccounts: [...state.bankAccounts, account] })
-    addAuditLog('CREATE', 'BANK', accountKey, `Created ${newBankAccountType.toLowerCase()} bank account.`)
-    setNewBankName(''); setNewBankAccountName(''); setNewBankAccountNumber(''); setNewBankAccountType('Current')
-    setNewBankCurrency('NGN'); setNewBankOpeningBalance(0); setNewBankOpeningDate(new Date().toISOString().slice(0, 10))
-    setBankCreationStatus(`${accountKey} was created and is now available in Bank Balances.`)
+    const renamed = saved.updated && saved.account.name !== state.bankAccounts.find((account) => account.id === saved.account.id)?.name
+    updateState({
+      banks: saved.banks,
+      bankAccounts: saved.bankAccounts,
+      ...(renamed ? { bankTxns: saved.bankTxns, expenses: saved.expenses, sales: saved.sales } : {}),
+    })
+    addAuditLog(saved.updated ? 'UPDATE' : 'CREATE', 'BANK', accountKey, saved.updated ? `Updated ${newBankAccountType.toLowerCase()} bank account.` : `Created ${newBankAccountType.toLowerCase()} bank account.`)
+    resetBankForm()
+    setBankCreationStatus(saved.updated ? `${accountKey} was updated.` : `${accountKey} was created and is now available in Bank Balances.`)
   }
 
   const togglePermission = (permission: PermissionKey) => {
@@ -639,8 +676,8 @@ export default function SettingsPage() {
 
             {activeSection === 'banks' && (
               <div className="panel-card">
-                <div className="panel-title">Create bank account</div>
-                <div className="panel-subtitle">Add an account here and it will appear immediately on the Bank Balances page.</div>
+                <div className="panel-title">{editingBankId ? 'Edit bank account' : 'Create bank account'}</div>
+                <div className="panel-subtitle">{editingBankId ? 'Changes are saved on this bank account.' : 'Add an account here and it will appear immediately on the Bank Balances page.'}</div>
                 <div className="form-grid two-up">
                   <div className="fg"><label>Bank name</label><input value={newBankName} onChange={(event) => setNewBankName(event.target.value)} placeholder="e.g. Zenith Bank" /></div>
                   <div className="fg"><label>Account name</label><input value={newBankAccountName} onChange={(event) => setNewBankAccountName(event.target.value)} placeholder="Main Business Account" /></div>
@@ -651,10 +688,13 @@ export default function SettingsPage() {
                   <div className="fg"><label>Opening balance date</label><input type="date" value={newBankOpeningDate} onChange={(event) => setNewBankOpeningDate(event.target.value)} /></div>
                 </div>
                 {bankCreationStatus && <div className="metric-note">{bankCreationStatus}</div>}
-                <button className="action-btn primary" type="button" onClick={handleCreateBank}>Create bank account</button>
+                <div className="inline-actions">
+                  <button className="action-btn primary" type="button" onClick={handleCreateBank}>{editingBankId ? 'Save bank account' : 'Create bank account'}</button>
+                  {editingBankId && <button className="action-btn" type="button" onClick={() => { resetBankForm(); setBankCreationStatus('') }}>Cancel</button>}
+                </div>
                 <div className="bank-account-register settings-bank-register">
                   <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening balance</span><span>Status</span></div>
-                  {state.bankAccounts.map((account) => <div className="bank-register-row" key={account.id}><span><strong>{account.name}</strong><small>{account.accountNumber || 'No account number'}</small></span><span>{account.accountType}</span><span>{formatCurrency(account.openingBalance)}</span><span>{account.status}</span></div>)}
+                  {state.bankAccounts.map((account) => <div className="bank-register-row" key={account.id}><span><strong>{account.name}</strong><small>{account.accountNumber || 'No account number'}</small><button className="action-btn bank-row-edit" type="button" onClick={() => startEditBank(account)}>Edit</button></span><span>{account.accountType}</span><span>{formatCurrency(account.openingBalance)}</span><span>{account.status}</span></div>)}
                   {state.bankAccounts.length === 0 && <div className="metric-note bank-empty-state">No bank accounts have been created yet.</div>}
                 </div>
               </div>
