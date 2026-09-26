@@ -8,7 +8,7 @@ import { useAccounting } from '@/lib/context'
 import { generatePin, generateStaffId, saveRoles, type AccessLevels, type PermissionKey, type RoleDefinition, type StaffMemberRecord } from '@/lib/rbac'
 import { saveUserToDatabase } from '@/lib/user-db'
 import { getSupabaseClient } from '@/lib/supabase.browser'
-import { getPlanUserLimit } from '@/lib/licensing'
+import { seatLimitForSubscription } from '@/lib/licensing'
 
 const branchOptions = ['Enugu', 'Onitsha', 'Lagos', 'Abuja']
 const genderOptions = ['Female', 'Male', 'Other']
@@ -292,7 +292,7 @@ export default function StaffManagementPage() {
   }
 
   const handleAddStaff = () => {
-    const userLimit = getPlanUserLimit(user?.subscriptionPlan)
+    const userLimit = seatLimitForSubscription(user?.subscriptionPlan, user?.subscriptionStatus)
     const currentUserCount = staffMembers.length + 1
     if (userLimit !== null && (userLimit === 0 || currentUserCount > userLimit)) {
       setUpgradeModalOpen(true)
@@ -317,7 +317,7 @@ export default function StaffManagementPage() {
     const generatedStaffId = employeeId || (drawerMode === 'edit' && activeStaff?.staffId ? activeStaff.staffId : generateStaffId(fullName))
 
     if (drawerMode === 'add') {
-      const userLimit = getPlanUserLimit(user?.subscriptionPlan)
+      const userLimit = seatLimitForSubscription(user?.subscriptionPlan, user?.subscriptionStatus)
       const currentUserCount = staffMembers.length + 1
       if (userLimit !== null && (userLimit === 0 || currentUserCount > userLimit)) {
         setUpgradeModalOpen(true)

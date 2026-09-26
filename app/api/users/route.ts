@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase.server'
-import { getPlanUserLimit, normalizePlanName } from '@/lib/licensing'
+import { seatLimitForSubscription } from '@/lib/licensing'
 
 type SupabaseWriteResult = { error: { message?: string } | null }
 
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
         }
 
         const { data: subscription } = await supabaseAdmin.from('subscriptions').select('plan_name,status').eq('company_id', payload.companyId).in('status', ['trial', 'active']).order('created_at', { ascending: false }).limit(1).maybeSingle()
-        const userLimit = subscription?.status === 'active' ? getPlanUserLimit(normalizePlanName(subscription.plan_name)) : 0
+        const userLimit = seatLimitForSubscription(subscription?.plan_name, subscription?.status)
         const { count: currentUserCount } = await supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('company_id', payload.companyId)
         const { data: existingByUsername } = await supabaseAdmin.from('users').select('id').eq('company_id', payload.companyId).eq('username', payload.username).limit(1)
         const { data: existingByStaffId } = await supabaseAdmin.from('users').select('id').eq('company_id', payload.companyId).eq('staff_id', payload.staffId).limit(1)
