@@ -422,6 +422,7 @@ export function getVisibleNavigationItems(user: Pick<UserWithRole, 'role' | 'per
         { label: 'Annual Report', href: '/annual-report', group: 'REPORTS', permission: 'annualReport' as PermissionKey, icon: 'annualReport' },
         { label: 'Asset Schedule', href: '/asset-schedule', group: 'REPORTS', permission: 'assetSchedule' as PermissionKey, icon: 'assetSchedule' },
         { label: 'Staff Management', href: '/staff-management', group: 'HUMAN RESOURCES', permission: 'admin' as PermissionKey, icon: 'settings' },
+        { label: 'Role Management', href: '/role-management', group: 'AUDIT & ADMIN', permission: 'admin' as PermissionKey, icon: 'settings' },
         { label: 'Settings', href: '/settings', group: 'AUDIT & ADMIN', permission: 'settings' as PermissionKey, icon: 'settings' },
         { label: 'Backup & Recovery', href: '/backup', group: 'AUDIT & ADMIN', permission: 'admin' as PermissionKey, icon: 'settings' },
         { label: 'Subscription & Licensing', href: '/subscription-and-licensing', group: 'AUDIT & ADMIN', permission: 'admin' as PermissionKey, icon: 'subscription' },
