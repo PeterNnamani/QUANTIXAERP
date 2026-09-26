@@ -43,6 +43,7 @@ export async function findUserInDatabase(
         .from('users')
         .select('*')
         .eq('pin', normalizedPin)
+        .abortSignal(AbortSignal.timeout(12000))
 
     if (error) {
         console.warn('Unable to query users table for login', error)
