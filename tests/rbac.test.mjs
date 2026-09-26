@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { canAccessRoute, canEditPermission, findStaffMemberByLogin, getVisibleNavigationItems, roleHasPermission } from '../lib/rbac.mjs'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { canAccessRoute, canEditPermission, explicitAccessLevels, findStaffMemberByLogin, getPermissionAccessLevel, getVisibleNavigationItems, hasExplicitMenuGrant, menuAccessFromLevels, roleHasPermission, savedMenuAccess } from '../lib/rbac.ts'
+
+const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 test('super admin has provisioning/oversight permissions, not transactional', () => {
     const superAdmin = { role: 'super-admin' }
@@ -129,6 +134,20 @@ test('explicit staff menu selections override role defaults', () => {
     assert.ok(!hrefs.includes('/ledger'))
     assert.equal(canAccessRoute(staff, '/expenses'), true)
     assert.equal(canAccessRoute(staff, '/sales'), false)
+})
+
+test('sign-in and the workspace use the typescript access module', () => {
+    assert.equal(fs.existsSync(path.join(repoRoot, 'lib/rbac.ts')), true)
+    assert.equal(fs.existsSync(path.join(repoRoot, 'lib/rbac.mjs')), false)
+    assert.equal(typeof savedMenuAccess, 'function')
+    assert.equal(typeof hasExplicitMenuGrant, 'function')
+    assert.equal(typeof explicitAccessLevels, 'function')
+    assert.equal(typeof menuAccessFromLevels, 'function')
+    assert.equal(typeof getPermissionAccessLevel, 'function')
+    const user = { accessLevels: { loans: 'view', sales: 'edit' } }
+    assert.equal(hasExplicitMenuGrant(user, 'loans'), true)
+    assert.equal(hasExplicitMenuGrant(user, 'sales'), true)
+    assert.equal(hasExplicitMenuGrant(user, 'ledger'), false)
 })
 
 test('an explicitly empty access map grants no menus', () => {
