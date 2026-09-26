@@ -6,6 +6,7 @@ import { useAccounting } from '@/lib/context'
 import { formatCurrency, formatNumber, triggerAppToast, makeID } from '@/lib/utils'
 import { downloadExcel, downloadPdf } from '@/lib/export-utils'
 import { calculateBalanceSheet } from '@/lib/accounting/balance-sheet'
+import { signedOpeningBalance } from '@/lib/accounting/opening-balances'
 import { postJournalEntry } from '@/lib/accounting/ledger'
 import { isUuid } from '@/lib/accounting/sync'
 import ManualJournalModal from '@/components/modals/ManualJournalModal'
@@ -287,10 +288,10 @@ export default function LedgerPage() {
               <div className="ledger-detail-panel">
                 <div className="ledger-detail-row"><span>Account Code</span><strong>{selectedAccountData?.code || '—'}</strong></div>
                 <div className="ledger-detail-row"><span>Account Name</span><strong>{selectedEntry?.account || 'Cash'}</strong></div>
-                <div className="ledger-detail-row"><span>Opening Balance</span><strong>{formatCurrency(selectedAccountData?.openingBalance || 0)}</strong></div>
+                <div className="ledger-detail-row"><span>Opening Balance</span><strong>{formatCurrency(signedOpeningBalance(selectedAccountData))}</strong></div>
                 <div className="ledger-detail-row"><span>Total Debits</span><strong>{formatCurrency(selectedAccountDebit)}</strong></div>
                 <div className="ledger-detail-row"><span>Total Credits</span><strong>{formatCurrency(selectedAccountCredit)}</strong></div>
-                <div className="ledger-detail-row"><span>Current Balance</span><strong>{formatCurrency((selectedAccountData?.openingBalance || 0) + selectedAccountBalance)}</strong></div>
+                <div className="ledger-detail-row"><span>Current Balance</span><strong>{formatCurrency(signedOpeningBalance(selectedAccountData) + selectedAccountBalance)}</strong></div>
               </div>
             </div>
 
@@ -307,7 +308,7 @@ export default function LedgerPage() {
                   const debit = lines.reduce((sum, line) => sum + line.debit, 0)
                   const credit = lines.reduce((sum, line) => sum + line.credit, 0)
                   const balance = account.normalBalance === 'CREDIT' ? credit - debit : debit - credit
-                  return <div className="ledger-balance-row" key={account.id}><span>{account.name}</span><strong>{formatCurrency((account.openingBalance || 0) + balance)}</strong></div>
+                  return <div className="ledger-balance-row" key={account.id}><span>{account.name}</span><strong>{formatCurrency(signedOpeningBalance(account) + balance)}</strong></div>
                 })}
               </div>
             </div>

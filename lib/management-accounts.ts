@@ -1,3 +1,5 @@
+import { signedOpeningBalance } from './accounting/opening-balances.js'
+
 export type ReportPeriod = { label: string; startDate: string; endDate: string }
 
 type Account = {
@@ -65,8 +67,19 @@ const SALES_MODULES = new Set(['SALES', 'SALES_PAYMENT', 'SALES_RECEIVABLE'])
 function lineBalance(account: Account, lines: JournalLine[], entries: JournalEntry[], endDate: string, startDate?: string) {
     const validEntries = new Set(entries.filter((entry) => entry.status === 'POSTED' && entryDay(entry) <= endDate && (!startDate || entryDay(entry) >= startDate)).map((entry) => entry.id))
     const value = lines.filter((line) => line.accountId === account.id && validEntries.has(line.entryId)).reduce((total, line) => total + n(line.debit) - n(line.credit), 0)
-    const opening = !startDate ? n(account.openingBalance) : 0
+    const opening = !startDate ? signedOpeningBalance(account, endDate) : 0
     return account.normalBalance === 'CREDIT' ? opening - value : opening + value
+}
+
+function ledgerBalance(accounts: Account[], lines: JournalLine[], entries: JournalEntry[], names: string[], endDate: string) {
+    const wanted = new Set(names.map(clean))
+    return sum(accounts.filter((account) => wanted.has(clean(account.name))).map((account) => lineBalance(account, lines, entries, endDate)))
+}
+
+function withLedgerOpening(rows: AmountRow[], ledger: number, note: number): AmountRow[] {
+    const subtotal = rows[rows.length - 1]?.total || 0
+    if (Math.abs(subtotal) > 0.005 || Math.abs(ledger) <= 0.005) return rows
+    return [...rows.slice(0, -1), { label: 'Ledger balance', values: [ledger], total: ledger }, { label: 'Subtotal', values: [ledger], total: ledger, note }]
 }
 
 function linkedRevenue(input: ManagementAccountsInput, periods: ReportPeriod[]) {
@@ -252,21 +265,41 @@ export function buildManagementAccounts(input: ManagementAccountsInput, periods:
         12: { columns: orderedPeriods.map((period) => period.label), rows: bankChargeNoteRows },
     }
     const ppe = { classes: ppeClasses, rows: ppeRows }
+    const ledgerFaces = {
+        2: ledgerBalance(accounts, lines, entries, ['Cash and Bank Balance', 'Cash'], endDate),
+        3: ledgerBalance(accounts, lines, entries, ['Inventory'], endDate),
+        4: ledgerBalance(accounts, lines, entries, ['Prepayments'], endDate),
+        5: ledgerBalance(accounts, lines, entries, ['Receivables', 'Trade Receivables'], endDate),
+        6: ledgerBalance(accounts, lines, entries, ['Loan'], endDate),
+        7: ledgerBalance(accounts, lines, entries, ['Payables', 'Accounts Payable'], endDate),
+        8: ledgerBalance(accounts, lines, entries, ['Accruals'], endDate),
+    }
+    notes[2] = withLedgerOpening(notes[2], ledgerFaces[2], 2)
+    notes[3] = withLedgerOpening(notes[3], ledgerFaces[3], 3)
+    notes[4] = withLedgerOpening(notes[4], ledgerFaces[4], 4)
+    notes[5] = withLedgerOpening(notes[5], ledgerFaces[5], 5)
+    notes[6] = withLedgerOpening(notes[6], ledgerFaces[6], 6)
+    notes[7] = withLedgerOpening(notes[7], ledgerFaces[7], 7)
+    notes[8] = withLedgerOpening(notes[8], ledgerFaces[8], 8)
     const cash = notes[2][notes[2].length - 1].total
     const inventory = notes[3][notes[3].length - 1].total
     const prepayments = notes[4][notes[4].length - 1].total
     const receivables = notes[5][notes[5].length - 1].total
     const loan = notes[6][notes[6].length - 1].total
     const payables = notes[7][notes[7].length - 1].total
-    const accruals = 0
+    const accruals = notes[8][notes[8].length - 1].total
+    const ppeLedger = ledgerBalance(accounts, lines, entries, ['Property, Plant & Equipment'], endDate)
+    const ppeTotal = ppeRows[8].total + (Math.abs(ppeRows[8].total) > 0.005 ? 0 : ppeLedger)
     const totalCurrentAssets = cash + inventory + prepayments + receivables
-    const totalAssets = ppeRows[8].total + totalCurrentAssets
-    const capital = accountValue(input.chartOfAccounts, input.journalLines, input.journalEntries, ['capital'], endDate)
-    const drawings = pnlRows[pnlRows.length - 1].total
-    const totalEquity = capital + pnlRows[pnlRows.length - 2].total + drawings
+    const totalAssets = ppeRows[8].total + totalCurrentAssets + (ppeTotal - ppeRows[8].total)
+    const capital = ledgerBalance(accounts, lines, entries, ['Capital'], endDate)
+    const retainedOpening = signedOpeningBalance(accounts.find((account) => clean(account.name) === 'retained earnings'), endDate)
+    const retainedEarnings = pnlRows[pnlRows.length - 2].total + retainedOpening
+    const drawings = -ledgerBalance(accounts, lines, entries, ['Drawings'], endDate)
+    const totalEquity = capital + retainedEarnings + drawings
     const totalEquityLiabilities = totalEquity + loan + payables + accruals
     const sfpRows: AmountRow[] = [
-        { label: 'Property, Plant & Equipment', note: 1, values: [ppeRows[8].total], total: ppeRows[8].total },
+        { label: 'Property, Plant & Equipment', note: 1, values: [ppeTotal], total: ppeTotal },
         { label: 'CURRENT ASSETS:', values: [], total: 0, kind: 'section' },
         { label: 'Cash and Bank Balance', note: 2, values: [cash], total: cash },
         { label: 'Inventory', note: 3, values: [inventory], total: inventory },
@@ -275,7 +308,7 @@ export function buildManagementAccounts(input: ManagementAccountsInput, periods:
         { label: 'TOTAL ASSETS', values: [totalAssets], total: totalAssets },
         { label: 'EQUITY:', values: [], total: 0, kind: 'section' },
         { label: 'Capital', values: [capital], total: capital },
-        { label: 'Retained Earnings', values: [pnlRows[pnlRows.length - 2].total], total: pnlRows[pnlRows.length - 2].total },
+        { label: 'Retained Earnings', values: [retainedEarnings], total: retainedEarnings },
         { label: 'Drawings', values: [drawings], total: drawings },
         { label: 'CURRENT LIABILITIES:', values: [], total: 0, kind: 'section' },
         { label: 'Loan', note: 6, values: [loan], total: loan },
@@ -287,12 +320,18 @@ export function buildManagementAccounts(input: ManagementAccountsInput, periods:
     const accountRows = input.chartOfAccounts.map((account) => ({ account, value: lineBalance(account, input.journalLines, input.journalEntries, endDate) }))
     const leftNames = ['Revenue', 'Cost of Sales', 'Admin/Overhead', 'Office Supplies & Consumables', 'Distribution & Logistics', 'Sales & Marketing', 'Office Utilities', 'Operations and Wages', 'Depreciation', 'Govt. Levies/Licenses/Permits', 'Fines and Permits', 'Finance Cost', 'Bank Charges', 'PPE', 'Cash & Bank', 'Inventory', 'Prepayments', 'Receivables', 'Capital', 'Retained Earnings', 'Drawings', 'Loan', 'Payables', 'Accruals']
     const rightNames = ['PPE', 'Cash and Bank Balance', 'Inventory', 'Prepayments', 'Receivables', 'Capital', 'Retained Earnings', 'Drawings', 'Loan', 'Payables', 'Accruals']
+    const presentedSide = (account: Account, value: number) => account.normalBalance === 'CREDIT'
+        ? { debit: Math.max(-value, 0), credit: Math.max(value, 0) }
+        : { debit: Math.max(value, 0), credit: Math.max(-value, 0) }
     const tbRow = (label: string, names: string[]): AmountRow => {
-        const value = sum(accountRows.filter(({ account }) => matches(account, names.flatMap((name) => name.toLowerCase().split(/[^a-z]+/).filter((term) => term.length > 3)))).map((row) => row.value))
-        return { label, values: [Math.max(value, 0), Math.max(-value, 0)], total: value }
+        const matched = accountRows.filter(({ account }) => matches(account, names.flatMap((name) => name.toLowerCase().split(/[^a-z]+/).filter((term) => term.length > 3))))
+        const debit = sum(matched.map(({ account, value }) => presentedSide(account, value).debit))
+        const credit = sum(matched.map(({ account, value }) => presentedSide(account, value).credit))
+        return { label, values: [debit, credit], total: debit - credit }
     }
     const left = leftNames.map((name) => tbRow(name, [name])); const right = rightNames.map((name) => tbRow(name, [name]))
-    const debit = sum([...left, ...right].map((row) => row.values[0])); const credit = sum([...left, ...right].map((row) => row.values[1]))
+    const debit = sum(accountRows.map(({ account, value }) => presentedSide(account, value).debit))
+    const credit = sum(accountRows.map(({ account, value }) => presentedSide(account, value).credit))
     const trialBalance = { left, right, debit, credit, balanced: Math.abs(debit - credit) < 0.01 }
     const notesTie = [[notes[2], cash], [notes[3], inventory], [notes[4], prepayments], [notes[5], receivables], [notes[6], loan], [notes[7], payables], [notes[8], accruals]].every(([rows, faceValue]) => Math.abs((rows as AmountRow[])[(rows as AmountRow[]).length - 1].total - (faceValue as number)) < 0.01)
     return { periods: orderedPeriods, notes, notesII, ppe, pnl: { rows: pnlRows, grossMargin: sum(operations.revenue) ? sum(grossProfit) / sum(operations.revenue) : 0 }, sfp: { rows: sfpRows, totalAssets, totalEquityLiabilities, difference: totalAssets - totalEquityLiabilities }, trialBalance, validation: { trialBalance: trialBalance.balanced, statementOfFinancialPosition: Math.abs(totalAssets - totalEquityLiabilities) < 0.01, notes: notesTie, canSignOff: trialBalance.balanced && Math.abs(totalAssets - totalEquityLiabilities) < 0.01 && notesTie } }

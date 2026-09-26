@@ -64,6 +64,7 @@ import { setExportCompanyName } from '@/lib/export-utils'
 import { wipedCompanyBooks } from '@/lib/company-lifecycle'
 import { mergeReceivablesFromSales } from '@/lib/receivables'
 import { bankTxnKey, businessReference, isUuid, isoDate, selectUnpostedJournals, shouldPostExpenseCash, subledgerReference } from '@/lib/accounting/sync'
+import { capitalOpeningAmount, normalizeOpeningDate, persistChartOpeningBalances, reconcileCapitalOpening } from '@/lib/accounting/opening-balances'
 
 export interface User {
   companyId?: string
@@ -413,6 +414,7 @@ export interface AccountingContextType {
   subscriptionLoaded: boolean
   state: AppState
   updateState: (updates: Partial<AppState>, options?: { persist?: boolean }) => void
+  saveOpeningBalances: (accounts: LedgerAccount[]) => Promise<{ persisted: boolean }>
   resetCompanyBooks: () => void
   deleteInventoryItems: (skus: string[]) => Promise<void>
   login: (userData: User, remember: boolean) => void
@@ -886,14 +888,25 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             ? normalizeRemotePrepayments(prepaymentsData)
             : []
         const { supplierList, customerList } = normalizeRemoteContacts(contactsData || [])
+        const mappedChart = accountsErr ? null : dedupeChartOfAccounts((accountsData || []).map((account: any) => ({
+          id: account.id, code: account.code, name: account.name, accountType: account.account_type,
+          accountSubType: account.account_subtype, normalBalance: account.normal_balance,
+          isControlAccount: account.is_control_account, isActive: account.is_active, currency: account.currency,
+          openingBalance: Number(account.opening_balance || 0), openingBalanceDate: account.opening_balance_date,
+        })))
 
-        setState((prev) => ({
+        setState((prev) => {
+          const remoteOpeningCapital = Number(companyData?.settings?.openingCapital ?? prev.openingCapital)
+          const loadedChart = mappedChart ? reconcileCapitalOpening(mappedChart, remoteOpeningCapital) : null
+          const openingCapital = loadedChart ? capitalOpeningAmount(loadedChart) || remoteOpeningCapital : remoteOpeningCapital
+          return {
           ...prev,
           companySettings: normalizeCompanySettings({
             ...(companyData?.settings || {}),
             companyName: companyData?.name || prev.companySettings.companyName || user.companyName || '',
+            openingCapital,
           }, prev.companySettings),
-          openingCapital: Number(companyData?.settings?.openingCapital ?? prev.openingCapital),
+          openingCapital,
           roles: Array.isArray(companyData?.settings?.roles) && companyData.settings.roles.length > 0 ? companyData.settings.roles : prev.roles,
           sales: mergeRemoteRecords(remoteSales, prev.sales, Boolean(salesErr)),
           purchases: mergeRemoteRecords(remotePurchases, prev.purchases, Boolean(purchasesErr)),
@@ -907,12 +920,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           loanRepayments: loanRepaymentsErr ? prev.loanRepayments : normalizeRemoteLoanRepayments(loanRepaymentsData || []),
           receivables: mergeRemoteRecords(remoteReceivables, prev.receivables, Boolean(receivablesErr), 'local'),
           payables: mergeRemoteRecords(payablesErr ? [] : normalizeRemotePayables(payablesData || []), prev.payables, Boolean(payablesErr), 'local'),
-          chartOfAccounts: accountsErr ? prev.chartOfAccounts : dedupeChartOfAccounts((accountsData || []).map((account: any) => ({
-            id: account.id, code: account.code, name: account.name, accountType: account.account_type,
-            accountSubType: account.account_subtype, normalBalance: account.normal_balance,
-            isControlAccount: account.is_control_account, isActive: account.is_active, currency: account.currency,
-            openingBalance: Number(account.opening_balance || 0), openingBalanceDate: account.opening_balance_date,
-          }))),
+          chartOfAccounts: loadedChart || prev.chartOfAccounts,
           journalEntries: entriesErr ? prev.journalEntries : (entriesData || []).map((entry: any) => ({
             id: entry.id, entryDate: isoDate(entry.entry_date), periodId: entry.period_id, reference: entry.reference || '',
             description: entry.description || '', sourceModule: entry.source_module, sourceId: entry.source_id,
@@ -923,7 +931,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             credit: Number(line.credit || 0), description: line.description || '',
           })),
           auditLogs: mergeRemoteRecords(auditLogsErr ? [] : normalizeRemoteAuditLogs(auditLogsData || []), prev.auditLogs, Boolean(auditLogsErr)),
-        }))
+          }
+        })
 
         if (companyData?.name && user.companyName !== companyData.name) {
           setUser((current) => current ? { ...current, companyName: companyData.name } : current)
@@ -1056,10 +1065,15 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       : null
     if (savedState) {
       const parsedState = JSON.parse(savedState)
+      const openingCapital = Number(parsedState.openingCapital ?? parsedState.companySettings?.openingCapital ?? 0)
+      const chartOfAccounts = reconcileCapitalOpening(Array.isArray(parsedState.chartOfAccounts) ? parsedState.chartOfAccounts : [], openingCapital)
+      const reconciledCapital = capitalOpeningAmount(chartOfAccounts) || openingCapital
       setState({
         ...defaultState,
         ...parsedState,
-        companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
+        openingCapital: reconciledCapital,
+        chartOfAccounts,
+        companySettings: normalizeCompanySettings({ ...parsedState.companySettings, openingCapital: reconciledCapital }, defaultState.companySettings),
         expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
         inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
         roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
@@ -1405,8 +1419,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               is_control_account: account.isControlAccount || false,
               is_active: account.isActive !== false,
               currency: account.currency || 'NGN',
-              opening_balance: account.openingBalance || 0,
-              opening_balance_date: account.openingBalanceDate || null,
+              opening_balance: Number(account.openingBalance || 0),
+              opening_balance_date: normalizeOpeningDate(account.openingBalanceDate),
               updated_at: new Date().toISOString(),
             }))
             if (accountRows.length > 0) {
@@ -1738,11 +1752,28 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const saveOpeningBalances = async (accounts: LedgerAccount[]) => {
+    const openingCapital = capitalOpeningAmount(accounts)
+    let savedAccounts = accounts
+    let persisted = false
+    if (supabase && user?.companyId) {
+      savedAccounts = await persistChartOpeningBalances(supabase, user.companyId, accounts)
+      persisted = true
+    }
+    updateState({
+      chartOfAccounts: savedAccounts,
+      openingCapital,
+      companySettings: { ...state.companySettings, openingCapital },
+    })
+    return { persisted }
+  }
+
   const value: AccountingContextType = {
     user,
     subscriptionLoaded,
     state,
     updateState,
+    saveOpeningBalances,
     resetCompanyBooks,
     deleteInventoryItems,
     login,

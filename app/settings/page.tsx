@@ -8,7 +8,8 @@ import { formatCurrency } from '@/lib/utils'
 import { canEditPermission, getDefaultRoles, saveRoles, type RoleDefinition, type PermissionKey } from '@/lib/rbac'
 import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipeConfirmationPhrase } from '@/lib/company-lifecycle'
 import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
-import { dedupeChartOfAccounts, requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
+import { requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
+import { capitalOpeningAmount, mergeOpeningBalances, reconcileCapitalOpening } from '@/lib/accounting/opening-balances'
 
 const sidebarSections = [
   { id: 'company', label: 'Company', description: 'Profile, branding, and legal details' },
@@ -22,7 +23,7 @@ const sidebarSections = [
 ]
 
 export default function SettingsPage() {
-  const { state, updateState, resetCompanyBooks, addAuditLog, user, logout } = useAccounting()
+  const { state, updateState, saveOpeningBalances, resetCompanyBooks, addAuditLog, user, logout } = useAccounting()
   const defaultUserSettings: UserSettings = {
     dateFormat: 'DD/MM/YYYY', timezone: 'Africa/Lagos',
     notifications: { email: true, push: true, whatsapp: true },
@@ -34,6 +35,7 @@ export default function SettingsPage() {
   const [openingCapital, setOpeningCapital] = useState(state.openingCapital)
   const [openingBalanceDrafts, setOpeningBalanceDrafts] = useState<Record<string, number>>({})
   const [openingDateDrafts, setOpeningDateDrafts] = useState<Record<string, string>>({})
+  const [savingOpeningBalances, setSavingOpeningBalances] = useState(false)
   const [activeSection, setActiveSection] = useState('security')
   const [roles, setRoles] = useState<RoleDefinition[]>(state.roles || getDefaultRoles())
   const [roleName, setRoleName] = useState('Sales Supervisor')
@@ -75,12 +77,20 @@ export default function SettingsPage() {
   }, [user?.userSettings])
 
   useEffect(() => {
+    setOpeningCapital(state.openingCapital)
+  }, [state.openingCapital])
+
+  useEffect(() => {
     if (sectionChosen.current || !canManageCompanySettings) return
     sectionChosen.current = true
     setActiveSection('company')
   }, [canManageCompanySettings])
 
   const selectedRole = useMemo(() => roles.find((role) => role.id === previewRoleId) || roles[0], [previewRoleId, roles])
+  const chartWithCapital = useMemo(
+    () => reconcileCapitalOpening(state.chartOfAccounts, state.openingCapital),
+    [state.chartOfAccounts, state.openingCapital],
+  )
 
   const updateCompanySettings = (updates: Partial<CompanySettings>) => {
     updateState({ companySettings: { ...companySettings, ...updates } })
@@ -90,32 +100,44 @@ export default function SettingsPage() {
     updateCompanySettings({ [section]: { ...companySettings[section], ...updates } } as Pick<CompanySettings, K>)
   }
 
+  const persistOpeningBalances = async (accounts: ReturnType<typeof mergeOpeningBalances>, successMessage: string) => {
+    setSavingOpeningBalances(true)
+    setSettingsNotice(null)
+    try {
+      const result = await saveOpeningBalances(accounts)
+      setOpeningBalanceDrafts({})
+      setOpeningDateDrafts({})
+      setOpeningCapital(capitalOpeningAmount(accounts))
+      if (result.persisted) addAuditLog('UPDATE', 'ACCOUNTING', 'OPENING_BALANCES', successMessage)
+      setSettingsNotice({
+        tone: result.persisted ? 'success' : 'error',
+        message: result.persisted ? successMessage : 'These balances are visible in this workspace, but the database is not connected.',
+      })
+    } catch (error) {
+      setSettingsNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to save opening balances.' })
+    } finally {
+      setSavingOpeningBalances(false)
+    }
+  }
+
   const handleSaveOpeningCapital = () => {
-    const value = parseFloat(openingCapital as any) || 0
-    updateState({ openingCapital: value, companySettings: { ...companySettings, openingCapital: value } })
-    setSettingsNotice({ tone: 'success', message: 'Opening capital saved.' })
+    const value = Number(openingCapital) || 0
+    const accounts = mergeOpeningBalances(chartWithCapital).map((account) => (
+      String(account.name || '').trim().toLowerCase() === 'capital' ? { ...account, openingBalance: value } : account
+    ))
+    void persistOpeningBalances(accounts, 'Opening capital saved.')
   }
 
   const financialPositionAccounts = useMemo(() => {
     const missingAccounts = requiredFinancialPositionAccounts.filter((required) => !state.chartOfAccounts.some((account) => account.name.toLowerCase() === required.name.toLowerCase()))
-    return dedupeChartOfAccounts([...state.chartOfAccounts, ...missingAccounts]).filter((account) => ['ASSET', 'LIABILITY', 'EQUITY'].includes(account.accountType))
-  }, [state.chartOfAccounts])
+    return mergeOpeningBalances([...chartWithCapital, ...missingAccounts]).filter((account) => ['ASSET', 'LIABILITY', 'EQUITY'].includes(account.accountType))
+  }, [chartWithCapital, state.chartOfAccounts])
 
   const handleSaveOpeningBalances = () => {
-    const mergedChartOfAccounts = dedupeChartOfAccounts([
-      ...state.chartOfAccounts,
-      ...requiredFinancialPositionAccounts.map((account) => ({ ...account, openingBalance: 0, openingBalanceDate: null })),
-    ]).map((account) => {
-      if (!['ASSET', 'LIABILITY', 'EQUITY'].includes(account.accountType)) return account
-      return {
-        ...account,
-        openingBalance: openingBalanceDrafts[account.id] ?? account.openingBalance ?? 0,
-        openingBalanceDate: openingDateDrafts[account.id] ?? account.openingBalanceDate ?? null,
-      }
-    })
-    updateState({ chartOfAccounts: mergedChartOfAccounts })
-    addAuditLog('UPDATE', 'ACCOUNTING', 'OPENING_BALANCES', 'Financial-position opening balances updated.')
-    setSettingsNotice({ tone: 'success', message: 'Opening balances saved.' })
+    void persistOpeningBalances(
+      mergeOpeningBalances(chartWithCapital, openingBalanceDrafts, openingDateDrafts),
+      'Opening balances saved.',
+    )
   }
 
   const openImportModal = () => {
@@ -530,7 +552,7 @@ export default function SettingsPage() {
                     <label>Opening balance / capital</label>
                     <div className="inline-actions">
                       <input type="number" value={openingCapital} onChange={(e) => setOpeningCapital(parseFloat(e.target.value) || 0)} />
-                      <button className="action-btn primary" onClick={handleSaveOpeningCapital}>Save</button>
+                      <button className="action-btn primary" type="button" onClick={handleSaveOpeningCapital} disabled={savingOpeningBalances}>{savingOpeningBalances ? 'Saving…' : 'Save'}</button>
                     </div>
                     <div className="metric-note">Current: {formatCurrency(state.openingCapital)}</div>
                   </div>
@@ -544,9 +566,9 @@ export default function SettingsPage() {
                 <div className="panel-head">
                   <div>
                     <div className="panel-title">Financial-position opening balances</div>
-                    <div className="panel-subtitle">Enter the balances brought forward for every asset, liability, and equity account.</div>
+                    <div className="panel-subtitle">These balances are stored on the chart of accounts and flow into the ledger, trial balance, and statement of financial position.</div>
                   </div>
-                  <button className="action-btn primary" type="button" onClick={handleSaveOpeningBalances}>Save opening balances</button>
+                  <button className="action-btn primary" type="button" onClick={handleSaveOpeningBalances} disabled={savingOpeningBalances}>{savingOpeningBalances ? 'Saving…' : 'Save opening balances'}</button>
                 </div>
                 {settingsNotice && <div className={`staff-inline-notice ${settingsNotice.tone}`}>{settingsNotice.message}</div>}
                 <div className="bank-account-register">
