@@ -4,8 +4,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Calculator, CreditCard } from 'lucide-react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
+import { resolvePayrollStaff, validateKpiScore } from '@/lib/payroll'
 import { getSupabaseClient } from '@/lib/supabase.browser'
 import type { StaffMemberRecord } from '@/lib/rbac'
+import { triggerAppToast } from '@/lib/utils'
 
 type PayrollPayment = {
     id: string
@@ -87,13 +89,17 @@ export default function PayrollPage() {
                 id: String(member.id || member.staff_id), name: String(member.full_name || member.username || member.staff_id || 'Staff User'), staffId: String(member.staff_id || ''),
                 pin: '', roleId: '', roleName: '', permissions: [], dataScope: 'team', status: member.status === 'disabled' ? 'disabled' : 'active', createdAt: '', salary: member.salary || undefined,
             })) as StaffMemberRecord[]
+            const staffDirectory = (nextStaff.length > 0 ? nextStaff : state.staffMembers).map((member) => ({ id: member.id, staffId: member.staffId, name: member.name }))
             setBankAccounts(nextBanks)
             setStaffMembers(nextStaff.length > 0 ? nextStaff : state.staffMembers)
-            setPayrollPayments((payments || []).map((payment: any) => ({
-                id: payment.id, staffId: payment.staff_id, staffName: nextStaff.find((member) => member.staffId === payment.staff_id)?.name || state.staffMembers.find((member) => member.staffId === payment.staff_id)?.name || 'Staff member',
-                bankName: nextBanks.find((bank) => bank.id === payment.bank_account_id)?.name || 'Bank account', payDate: payment.pay_date, currency: payment.currency || 'NGN',
-                baseAmount: Number(payment.base_amount || 0), incentiveAmount: Number(payment.incentive_amount || 0), deductions: Number(payment.deductions || 0), totalAmount: Number(payment.total_amount || 0), incentiveType: payment.incentive_type || '', reference: payment.reference || '',
-            })))
+            setPayrollPayments((payments || []).map((payment: any) => {
+                const resolved = resolvePayrollStaff(String(payment.staff_id || ''), staffDirectory)
+                return {
+                    id: payment.id, staffId: resolved.staffId, staffName: resolved.staffName,
+                    bankName: nextBanks.find((bank) => bank.id === payment.bank_account_id)?.name || 'Bank account', payDate: payment.pay_date, currency: payment.currency || 'NGN',
+                    baseAmount: Number(payment.base_amount || 0), incentiveAmount: Number(payment.incentive_amount || 0), deductions: Number(payment.deductions || 0), totalAmount: Number(payment.total_amount || 0), incentiveType: payment.incentive_type || '', reference: payment.reference || '',
+                }
+            }))
         }
         loadPayrollData()
     }, [user?.companyId, state.staffMembers])
@@ -107,8 +113,13 @@ export default function PayrollPage() {
     }
 
     const processStaffPayment = async () => {
+        const kpiError = validateKpiScore(kpiScore)
         if (!user?.companyId || !paymentStaffId || !paymentBankId || !paymentDate || paymentTotal <= 0) {
             setInlineNotice({ message: 'Select a staff member and bank account, then enter a positive net pay amount.', tone: 'error' })
+            return
+        }
+        if (kpiError) {
+            setInlineNotice({ message: kpiError, tone: 'error' })
             return
         }
         setPaymentProcessing(true)
@@ -125,10 +136,14 @@ export default function PayrollPage() {
                 expenses: [{ id: payment.id, date: payment.payDate, desc: `Payroll payment - ${payment.staffName}`, category: 'Salary', amount: payment.totalAmount, bank: payment.bankName, notes: payment.reference || '', status: 'Paid', enteredBy: user.name }, ...state.expenses],
                 journalEntries: result.journalEntry ? [result.journalEntry, ...state.journalEntries] : state.journalEntries, journalLines: result.journalLines ? [...result.journalLines, ...state.journalLines] : state.journalLines,
             }, { persist: false })
-            setInlineNotice({ message: `${formatMoney(payment.totalAmount, payment.currency)} paid to ${payment.staffName}. ${payment.bankName} was updated.`, tone: 'success' })
+            const message = `${formatMoney(payment.totalAmount, payment.currency)} paid to ${payment.staffName}. ${payment.bankName} was updated.`
+            setInlineNotice({ message, tone: 'success' })
+            triggerAppToast('Payroll paid', message)
             resetPaymentForm()
         } catch (error) {
-            setInlineNotice({ message: error instanceof Error ? error.message : 'Unable to process payment.', tone: 'error' })
+            const message = error instanceof Error ? error.message : 'Unable to process payment.'
+            setInlineNotice({ message, tone: 'error' })
+            triggerAppToast('Payroll payment failed', message)
         } finally { setPaymentProcessing(false) }
     }
 
@@ -154,6 +169,7 @@ export default function PayrollPage() {
                     <div className="inline-actions" style={{ justifyContent: 'space-between', marginTop: 18, paddingTop: 18, borderTop: '1px solid var(--border)' }}><div><div className="metric-note">Net pay = base pay + incentive - deductions</div><div style={{ fontSize: 22, fontWeight: 800 }}>{formatMoney(paymentTotal)}</div></div><button className="action-btn primary allow-readonly" type="button" onClick={processStaffPayment} disabled={paymentProcessing || bankAccounts.length === 0}>{paymentProcessing ? 'Processing...' : <><CreditCard size={16} /> Pay staff</>}</button></div>
                     {bankAccounts.length === 0 && <div className="metric-note" style={{ marginTop: 12 }}>Add an active bank account in Settings before processing payroll.</div>}
                 </div>
+                <div className="panel-card" style={{ marginBottom: 20 }}><div className="panel-head"><div><div className="panel-title">Staff pay status</div><div className="page-subtitle">Paid, due soon, overdue, or still owing for every active staff member.</div></div></div><div className="table-wrap"><table className="data-table"><thead><tr><th>Staff</th><th>Last paid</th><th>Next payment</th><th>Status</th></tr></thead><tbody>{staffMembers.filter((member) => member.status === 'active').map((member) => { const schedule = getPayrollStatus(member.staffId); const latest = latestPaymentByStaff.get(member.staffId); return <tr key={member.id}><td><strong>{member.name}</strong><div className="metric-note">{member.staffId}</div></td><td>{latest ? latest.payDate : '—'}</td><td>{schedule.nextDate}</td><td><span className={`badge ${schedule.tone}`}>{schedule.label}</span></td></tr> })}{staffMembers.filter((member) => member.status === 'active').length === 0 && <tr><td colSpan={4}>No active staff members are available for payroll.</td></tr>}</tbody></table></div></div>
                 {payrollPayments.length > 0 && <div className="panel-card"><div className="panel-head"><div><div className="panel-title">Recent payroll activity</div><div className="page-subtitle">Every payment is linked to its bank withdrawal, salary expense, and journal entry.</div></div></div><div className="table-wrap"><table className="data-table"><thead><tr><th>Date</th><th>Staff</th><th>Incentive</th><th>Bank</th><th>Net paid</th><th>Next payment</th><th>Status</th></tr></thead><tbody>{payrollPayments.slice(0, 8).map((payment) => { const schedule = getPayrollStatus(payment.staffId); return <tr key={payment.id}><td>{payment.payDate}</td><td><strong>{payment.staffName}</strong><div className="metric-note">{payment.reference || payment.staffId}</div></td><td>{payment.incentiveAmount > 0 ? `${payment.incentiveType || 'Incentive'} · ${formatMoney(payment.incentiveAmount, payment.currency)}` : '—'}</td><td>{payment.bankName}</td><td><strong>{formatMoney(payment.totalAmount, payment.currency)}</strong></td><td>{schedule.nextDate}</td><td><span className={`badge ${schedule.tone}`}>{schedule.label}</span></td></tr> })}</tbody></table></div></div>}
             </div>
         </AppLayout>

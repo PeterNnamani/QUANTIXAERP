@@ -1,58 +1,73 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
-import { calculateVAT, triggerAppToast, formatCurrency } from '@/lib/utils'
-import { downloadFinancialReportPdf, managementAccountsToExportSections } from '@/lib/export-utils'
+import { downloadExcel, downloadFinancialReportPdf, managementAccountsToExportSections, setExportCompanyName } from '@/lib/export-utils'
 import { buildManagementAccounts } from '@/lib/management-accounts'
+import { appendVatSection, nextReportRun, outputVat, sectionsToExcelRows, selectAnnualSections, taxPackageSection, yearPeriod, type ReportMode } from '@/lib/report-controls'
+import { formatCurrency, triggerAppToast } from '@/lib/utils'
 import FinancialReportSections from '@/components/financial-report-sections'
+
+const scheduleKey = 'quantixa:annual-report-schedule'
+const statements = ['All statements', 'Profit & Loss', 'Financial Position', 'Property, Plant & Equipment']
 
 export default function AnnualReportPage() {
     const { state } = useAccounting()
-    const [reportMode, setReportMode] = useState<'summary' | 'board' | 'tax'>('summary')
-    const [selectedStatement, setSelectedStatement] = useState('Profit & Loss')
+    const [year, setYear] = useState(new Date().getUTCFullYear())
+    const [reportMode, setReportMode] = useState<ReportMode>('summary')
+    const [selectedStatement, setSelectedStatement] = useState('All statements')
     const [includeVAT, setIncludeVAT] = useState(false)
+    const [statusMessage, setStatusMessage] = useState('Annual report generated for the current year.')
+    const [scheduledFor, setScheduledFor] = useState('')
 
-    const currentYear = new Date().getUTCFullYear().toString()
-    const yearStart = `${currentYear}-01-01`
-    const yearEnd = `${currentYear}-12-31`
-    const inYear = (date?: string) => Boolean(date && date >= yearStart && date <= yearEnd)
-    const annualSales = state.sales.filter((sale) => inYear(sale.date) && sale.status !== 'VOID')
-    const annualPurchaseRows = state.purchases.filter((purchase) => inYear(purchase.date) && purchase.status !== 'VOID')
-    const annualExpenseRows = state.expenses.filter((expense) => inYear(expense.date) && expense.status !== 'VOID')
-    const annualBankTransactions = state.bankTxns.filter((txn) => inYear(txn.date))
-    const annualRevenue = annualSales.reduce((sum, sale) => sum + sale.totalAmount, 0)
-    const annualExpenses = annualExpenseRows.reduce((sum, expense) => sum + expense.amount, 0)
-    const expenseBreakdown = useMemo(() => Array.from(annualExpenseRows.reduce((totals, expense) => totals.set(expense.category || 'Uncategorised', (totals.get(expense.category || 'Uncategorised') || 0) + expense.amount), new Map<string, number>())).map(([category, amount]) => [category, amount] as [string, number]), [annualExpenseRows])
-    const annualPurchases = annualPurchaseRows.reduce((sum, purchase) => sum + purchase.total, 0)
-    const annualPostedEntryIds = new Set(state.journalEntries.filter((entry) => entry.status === 'POSTED' && inYear(entry.entryDate)).map((entry) => entry.id))
-    const cogsAccountIds = new Set(state.chartOfAccounts.filter((account) => account.name.toLowerCase().includes('cost of goods sold')).map((account) => account.id))
-    const costOfGoodsSold = state.journalLines.filter((line) => cogsAccountIds.has(line.accountId) && annualPostedEntryIds.has(line.entryId)).reduce((sum, line) => sum + line.debit - line.credit, 0)
-    const annualNetProfit = annualRevenue - costOfGoodsSold - annualExpenses
-    const bankAccounts = Object.entries(state.banks)
-    const bankBalance = bankAccounts.reduce((sum, [, balance]) => sum + Number(balance || 0), 0)
-    const cashReceived = annualBankTransactions.filter((txn) => Number(txn.amount) > 0).reduce((sum, txn) => sum + Number(txn.amount), 0)
-    const cashPaid = annualBankTransactions.filter((txn) => Number(txn.amount) < 0).reduce((sum, txn) => sum + Math.abs(Number(txn.amount)), 0)
-    const cashAccount = state.chartOfAccounts.find((account) => account.name.toLowerCase().includes('cash') && !account.name.toLowerCase().includes('bank'))
-    const cashAccountBalance = cashAccount
-        ? Number(cashAccount.openingBalance || 0) + state.journalLines.filter((line) => line.accountId === cashAccount.id && state.journalEntries.some((entry) => entry.id === line.entryId && entry.status === 'POSTED' && entry.entryDate <= yearEnd)).reduce((sum, line) => sum + line.debit - line.credit, 0)
-        : 0
-    const inventoryValue = state.inventory.reduce((sum, item) => sum + item.unitCost * item.closing, 0)
-    const loansBalance = state.loans.reduce((sum, loan) => sum + Number(loan.balance ?? loan.amount ?? 0), 0)
-    const payablesBalance = state.payables.reduce((sum, item) => sum + Number(item.outstanding_amount ?? item.outstandingAmount ?? item.amount ?? 0), 0)
-    const exportReport = useMemo(() => buildManagementAccounts({ ...state, companyName: state.companySettings.companyName, currency: state.companySettings.currency || 'NGN' }, [{ label: currentYear, startDate: yearStart, endDate: yearEnd }]), [state, currentYear, yearStart, yearEnd])
+    useEffect(() => {
+        const stored = window.localStorage.getItem(scheduleKey)
+        if (stored) setScheduledFor(stored)
+    }, [])
+
+    const period = useMemo(() => yearPeriod(year), [year])
+    const exportReport = useMemo(() => buildManagementAccounts({ ...state, companyName: state.companySettings.companyName, currency: state.companySettings.currency || 'NGN' }, [period]), [state, period])
+    const revenueRow = exportReport.pnl.rows.find((row) => row.label === 'Revenue')
+    const profitRow = exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')
+    const taxInclusive = state.companySettings.taxInclusive !== false
+    const revenue = revenueRow?.total || 0
+    const profit = profitRow?.total || 0
+    const modeSections = selectAnnualSections(managementAccountsToExportSections(exportReport, false), reportMode, selectedStatement)
+    const sections = [
+        ...(includeVAT ? appendVatSection(modeSections, revenueRow?.values || [], [period.label], 0.075, taxInclusive) : modeSections),
+        ...(reportMode === 'tax' ? [taxPackageSection(revenue, profit, 0.075, taxInclusive)] : []),
+    ]
     const totalAssets = exportReport.sfp.totalAssets
+    const vatAmount = includeVAT || reportMode === 'tax' ? outputVat(revenue, 0.075, taxInclusive) : 0
+    const modeLabel = (mode: ReportMode) => mode === 'board' ? 'Board report' : mode === 'tax' ? 'Tax package' : 'Annual summary'
+
+    const exportCurrentReport = () => {
+        void downloadFinancialReportPdf({
+            filename: `annual-report-${year}.pdf`, reportTitle: 'Annual Report', periodLabel: `${period.label} | ${modeLabel(reportMode)}`, companyName: state.companySettings.companyName,
+            highlights: [{ label: 'Revenue', value: formatCurrency(revenue) }, { label: 'Net profit', value: formatCurrency(profit) }, { label: 'Total assets', value: formatCurrency(totalAssets) }, { label: 'Cash', value: formatCurrency(exportReport.notes[2]?.at(-1)?.total || 0) }, ...((includeVAT || reportMode === 'tax') ? [{ label: 'Output VAT', value: formatCurrency(vatAmount) }] : [])],
+            sections,
+            notes: [`Report mode: ${reportMode}; selected statement: ${selectedStatement}.`, `VAT is ${includeVAT || reportMode === 'tax' ? 'included in the report calculation.' : 'not included in this export.'}`, 'Amounts are calculated from non-void records in the selected accounting year.'],
+        })
+    }
 
     const handleAction = (action: string) => {
-        triggerAppToast(action, 'The report workflow has been prepared for the current year.')
-        if (action === 'Export PDF') {
-            void downloadFinancialReportPdf({
-                filename: 'annual-report.pdf', reportTitle: 'Annual Report', periodLabel: currentYear, companyName: state.companySettings.companyName,
-                highlights: [{ label: 'Revenue', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Revenue')?.total || 0) }, { label: 'Net profit', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')?.total || 0) }, { label: 'Total assets', value: formatCurrency(totalAssets) }, { label: 'Cash', value: formatCurrency(exportReport.notes[2]?.at(-1)?.total || 0) }],
-                sections: managementAccountsToExportSections(exportReport, false),
-                notes: [`Report mode: ${reportMode}; selected statement: ${selectedStatement}.`, `VAT is ${includeVAT ? 'included in the report calculation.' : 'not included in this export.'}`, 'Amounts are calculated from non-void records in the current accounting year.'],
-            })
+        if (action === 'Schedule Report') {
+            const nextRun = nextReportRun('annual')
+            window.localStorage.setItem(scheduleKey, nextRun)
+            setScheduledFor(nextRun)
+            const message = `Annual report scheduled. The next run is ${nextRun}.`
+            setStatusMessage(message)
+            triggerAppToast('Schedule Report', message)
+            return
+        }
+        const message = `${modeLabel(reportMode)} prepared for ${period.label}.`
+        setStatusMessage(message)
+        triggerAppToast(action, message)
+        if (action === 'Export PDF') exportCurrentReport()
+        if (action === 'Export Excel') {
+            setExportCompanyName(state.companySettings.companyName)
+            downloadExcel(`annual-report-${year}.xlsx`, sectionsToExcelRows(sections))
         }
     }
 
@@ -65,22 +80,33 @@ export default function AnnualReportPage() {
                         <div className="pg-subtitle">Complete yearly financial analysis, business growth, and strategic performance.</div>
                     </div>
                     <div className="page-actions">
-                        <button className="action-btn primary" type="button" onClick={() => { setReportMode('summary'); handleAction('Generate Annual Report') }}>Generate Annual Report</button>
-                        <button className="action-btn secondary" type="button" onClick={() => { setReportMode('board'); handleAction('Board Report') }}>Board Report</button>
+                        <button className="action-btn primary" type="button" onClick={() => { setReportMode('summary'); setStatusMessage(`Annual summary prepared for ${period.label}.`); triggerAppToast('Generate Annual Report', `Annual summary prepared for ${period.label}.`) }}>Generate Annual Report</button>
+                        <button className="action-btn secondary" type="button" onClick={() => { setReportMode('board'); setStatusMessage(`Board report prepared for ${period.label}.`); triggerAppToast('Board Report', `Board report prepared for ${period.label}.`) }}>Board Report</button>
                         <button className="action-btn secondary allow-readonly" type="button" onClick={() => handleAction('Export PDF')}>Export PDF</button>
-                        <button className="action-btn secondary" type="button" onClick={() => { setReportMode('tax'); handleAction('Tax Package') }}>Tax Package</button>
+                        <button className="action-btn secondary allow-readonly" type="button" onClick={() => handleAction('Export Excel')}>Export Excel</button>
+                        <button className="action-btn secondary" type="button" onClick={() => { setReportMode('tax'); setStatusMessage(`Tax package prepared for ${period.label}.`); triggerAppToast('Tax Package', `Tax package prepared for ${period.label}.`) }}>Tax Package</button>
+                        <button className="action-btn secondary" type="button" onClick={() => handleAction('Schedule Report')}>Schedule Report</button>
                         <label><input type="checkbox" checked={includeVAT} onChange={(event) => setIncludeVAT(event.target.checked)} /> Calculate VAT on export</label>
                     </div>
+                </div>
+
+                <div className="management-controls">
+                    <label>Year<input aria-label="Report year" type="number" min={2000} max={2100} value={year} onChange={(event) => setYear(Number(event.target.value) || new Date().getUTCFullYear())} /></label>
+                    <label>Statement
+                        <select aria-label="Annual statement" value={selectedStatement} onChange={(event) => { setSelectedStatement(event.target.value); setReportMode('summary') }}>
+                            {statements.map((statement) => <option key={statement}>{statement}</option>)}
+                        </select>
+                    </label>
                 </div>
 
                 <div className="report-card">
                     <div className="card-hd">
                         <div>
-                            <div className="card-title">PDF Report Statements</div>
-                            <div className="section-subtitle">The exact statements and values included in the annual PDF export.</div>
+                            <div className="card-title">{modeLabel(reportMode)}</div>
+                            <div className="section-subtitle">{period.label}. {statusMessage}{scheduledFor ? ` Next scheduled run: ${scheduledFor}.` : ''}</div>
                         </div>
                     </div>
-                    <FinancialReportSections sections={managementAccountsToExportSections(exportReport, false)} />
+                    <FinancialReportSections sections={sections} />
                 </div>
             </div>
         </AppLayout>

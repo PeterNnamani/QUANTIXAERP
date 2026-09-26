@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Bell, Check, X } from 'lucide-react'
 import { useAccounting, type User } from '@/lib/context'
+import { isPayrollActivity, pendingAuditActivity } from '@/lib/notifications'
 import { supabase } from '@/lib/supabase.browser'
 
 type NotificationItem = {
@@ -68,6 +69,7 @@ export default function NotificationBell({ user }: { user: User }) {
     const initializedRef = useRef(false)
     const recentNotificationRef = useRef<Map<string, number>>(new Map())
     const snapshotsRef = useRef<Record<string, Set<string>>>({})
+    const publishRef = useRef<(title: string, message: string, tone?: NotificationItem['tone'], force?: boolean) => void>(() => undefined)
     const auditPollInFlightRef = useRef(false)
     const auditCursorKey = `quantixa:admin-audit-cursor:${user.companyId || 'local'}:${user.staffId || user.username || user.name}`
     const persistedCursor = user.userSettings?.notificationCursor
@@ -110,6 +112,7 @@ export default function NotificationBell({ user }: { user: User }) {
         playSound()
         window.setTimeout(() => setPreview((current) => current?.id === item.id ? null : current), 5000)
     }
+    publishRef.current = publish
 
     useEffect(() => {
         setHydratedStorageKey(null)
@@ -147,11 +150,11 @@ export default function NotificationBell({ user }: { user: User }) {
     useEffect(() => {
         const handleToast = (event: Event) => {
             const detail = (event as CustomEvent<AppToastEvent>).detail || {}
-            publish(detail.title || 'Notification', detail.description || 'A new action requires your attention.', detail.tone || 'info')
+            publishRef.current(detail.title || 'Notification', detail.description || 'A new action requires your attention.', detail.tone || 'info')
         }
         window.addEventListener('quantixa:notification', handleToast)
         return () => window.removeEventListener('quantixa:notification', handleToast)
-    }, [pushEnabled])
+    }, [])
 
     useEffect(() => {
         const client = supabase
@@ -164,7 +167,7 @@ export default function NotificationBell({ user }: { user: User }) {
 
             const { data, error } = await client
                 .from('audit_logs')
-                .select('id,event_time,action,entity,module,event_type,reference,details,status,metadata,users(full_name,username)')
+                .select('id,event_time,action,entity,module,event_type,reference,details,status,metadata')
                 .eq('company_id', user.companyId)
                 .order('event_time', { ascending: false })
                 .limit(200)
@@ -178,24 +181,17 @@ export default function NotificationBell({ user }: { user: User }) {
             const relevantLogs = data
                 .filter((log: any) => log.metadata?.staff_id !== (user.staffId || null))
                 .filter((log: any) => !['LOGIN', 'LOGOUT'].includes(String(log.action || '').toUpperCase()))
-                .sort((left: any, right: any) => new Date(left.event_time).getTime() - new Date(right.event_time).getTime())
-            const pendingLogs = cursor
-                ? relevantLogs.filter((log: any) => new Date(log.event_time).getTime() > Number(cursor))
-                : relevantLogs
+            const { pending: pendingLogs, nextCursor } = pendingAuditActivity(relevantLogs, cursor)
 
-            if (pendingLogs.length > 0) {
-                pendingLogs.forEach((log: any, index: number) => {
-                    const actor = log.metadata?.user_name || log.users?.full_name || log.users?.username || 'A staff member'
-                    const failed = String(log.status || '').toUpperCase() === 'FAILED' || /fail|error/i.test(`${log.action} ${log.details}`)
-                    window.setTimeout(() => {
-                        if (!cancelled) publish('Staff activity', formatAuditActivity(log, actor), failed ? 'error' : 'info')
-                    }, index * 450)
-                })
-            }
+            pendingLogs.forEach((log: any, index: number) => {
+                const actor = log.metadata?.user_name || 'A staff member'
+                const failed = String(log.status || '').toUpperCase() === 'FAILED' || /fail|error/i.test(`${log.action} ${log.details}`)
+                window.setTimeout(() => {
+                    if (!cancelled) publishRef.current('Staff activity', formatAuditActivity(log, actor), failed ? 'error' : 'info')
+                }, index * 450)
+            })
 
-            const newestTimestamp = relevantLogs[relevantLogs.length - 1]?.event_time
-            if (newestTimestamp) {
-                const nextCursor = String(new Date(newestTimestamp).getTime())
+            if (nextCursor) {
                 window.localStorage.setItem(auditCursorKey, nextCursor)
                 if (nextCursor !== persistedCursor) {
                     void fetch('/api/users', {
@@ -236,6 +232,11 @@ export default function NotificationBell({ user }: { user: User }) {
     }, [pushEnabled, user.companyId, user.companyName, user.name, user.role, user.roleName, user.staffId, user.username])
 
     useEffect(() => {
+        if (!subscriptionLoaded) {
+            initializedRef.current = false
+            return
+        }
+
         const collections: Array<{ key: string; records: any[]; title: string; message: (record: any) => string; tone?: NotificationItem['tone'] }> = [
             { key: 'sales', records: state.sales, title: 'New sale recorded', message: (record) => `${record.customer || 'A customer'} sale for ${record.totalAmount || 0} was recorded.`, tone: 'success' },
             { key: 'expenses', records: state.expenses, title: 'New expense recorded', message: (record) => `${record.category || 'An expense'} entry for ${record.amount || 0} was recorded.` },
@@ -253,7 +254,7 @@ export default function NotificationBell({ user }: { user: User }) {
 
         collections.forEach(({ key, records, title, message, tone }) => {
             const previous = snapshotsRef.current[key] || new Set<string>()
-            const added = records.filter((record) => !previous.has(getRecordId(record, key)))
+            const added = records.filter((record) => !previous.has(getRecordId(record, key)) && !isPayrollActivity(record))
             added.slice(-3).forEach((record) => publish(title, message(record), tone))
             snapshotsRef.current[key] = new Set(records.map((record) => getRecordId(record, key)))
         })
@@ -274,7 +275,7 @@ export default function NotificationBell({ user }: { user: User }) {
             })
         }
         snapshotsRef.current.auditLogs = new Set(state.auditLogs.map((log) => getRecordId(log, log.timestamp)))
-    }, [pushEnabled, state.auditLogs, state.bankTxns, state.expenses, state.inventory, state.sales, state.staffMembers, user])
+    }, [pushEnabled, state.auditLogs, state.bankTxns, state.expenses, state.inventory, state.sales, state.staffMembers, subscriptionLoaded, user])
 
     const unreadCount = notifications.filter((item) => !item.read).length
 

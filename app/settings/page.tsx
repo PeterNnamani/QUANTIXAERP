@@ -495,6 +495,7 @@ export default function SettingsPage() {
                 <div className="toggle-list">
                   {([['email', 'Email'], ['push', 'Push notifications'], ['whatsapp', 'WhatsApp']] as const).map(([key, label]) => <label className="toggle-row" key={key}><span>{label}</span><input type="checkbox" checked={companySettings.notifications[key]} onChange={(event) => updateNestedSetting('notifications', { [key]: event.target.checked })} /></label>)}
                 </div>
+                <p className="metric-note">In-app alerts follow the push setting. Email and WhatsApp preferences are saved on the account; this workspace does not send those messages.</p>
               </div>
             )}
 
@@ -511,6 +512,7 @@ export default function SettingsPage() {
                   <div className="toggle-list">
                     {([['email', 'Email'], ['push', 'Push notifications'], ['whatsapp', 'WhatsApp']] as const).map(([key, label]) => <label className="toggle-row" key={key}><span>{label}</span><input type="checkbox" checked={userSettings.notifications[key]} onChange={(event) => setUserSettings((current) => ({ ...current, notifications: { ...current.notifications, [key]: event.target.checked } }))} /></label>)}
                     <label className="toggle-row"><span>Compact layout</span><input type="checkbox" checked={userSettings.compactMode} onChange={(event) => setUserSettings((current) => ({ ...current, compactMode: event.target.checked }))} /></label>
+                    <p className="metric-note">Push controls the bell. Email and WhatsApp stay on your account until a sender is connected.</p>
                   </div>
                   {userSettingsStatus && <div className={`staff-inline-notice ${userSettingsStatus.tone}`}>{userSettingsStatus.message}</div>}
                   <button className="action-btn primary allow-readonly" type="button" onClick={() => void handleUserSettingsSave()}>Save my settings</button>

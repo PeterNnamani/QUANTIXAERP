@@ -1599,7 +1599,8 @@ html[data-theme='dark'] .quantixa-input-button {
     color: var(--text2);
 }
 
-.management-controls input {
+.management-controls input,
+.management-controls select {
     min-height: 32px;
     border: 1px solid var(--border2);
     border-radius: 4px;

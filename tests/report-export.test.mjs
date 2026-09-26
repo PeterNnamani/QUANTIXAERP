@@ -17,10 +17,10 @@ test('management accounts use one authoritative bank source', () => {
 })
 
 test('report categories and PPE export structure are protected', () => {
-    assert.match(managementAccounts, /const transactionRevenue = periodValues/)
+    assert.match(managementAccounts, /function linkedRevenue/)
     assert.match(managementAccounts, /const transactionCogs = periodValues/)
-    assert.match(managementAccounts, /const revenue = sum\(ledgerRevenue\) > 0\.005 \? ledgerRevenue : transactionRevenue/)
-    assert.match(managementAccounts, /const cogs = sum\(ledgerCogs\) > 0\.005 \? ledgerCogs : transactionCogs/)
+    assert.match(managementAccounts, /const revenue = linkedRevenue\(input, periods\)/)
+    assert.match(managementAccounts, /const cogs = sum\(ledgerCogs\) > 0\.005 \? ledgerCogs : hasSales \? soldCogs : transactionCogs/)
     assert.match(managementAccounts, /row\.values\.some\(\(value\) => Math\.abs\(value\) > 0\.005\) \|\| \['Operations Cost', 'Bank Charges'\]/)
     assert.match(managementAccounts, /ACCUMULATED DEPRECIATION:/)
     assert.match(managementAccounts, /CARRYING AMOUNT/)

@@ -1,64 +1,83 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { downloadExcel, downloadFinancialReportPdf, managementAccountsToExportSections, setExportCompanyName } from '@/lib/export-utils'
 import { buildManagementAccounts } from '@/lib/management-accounts'
-import { calculateVAT, formatCurrency, triggerAppToast } from '@/lib/utils'
+import { appendVatSection, monthPeriod, nextReportRun, outputVat, previousPeriod, reportPeriod, sectionsToExcelRows, type ReportRange } from '@/lib/report-controls'
+import { formatCurrency, triggerAppToast } from '@/lib/utils'
 import FinancialReportSections from '@/components/financial-report-sections'
+
+const scheduleKey = 'quantixa:monthly-report-schedule'
 
 export default function MonthlyReportPage() {
     const { state } = useAccounting()
-    const [activeRange, setActiveRange] = useState<'Daily' | 'Weekly' | 'Monthly'>('Monthly')
-    const [statusMessage, setStatusMessage] = useState('Report generated for the current month.')
+    const today = new Date().toISOString().slice(0, 10)
+    const [activeRange, setActiveRange] = useState<ReportRange>('Monthly')
+    const [month, setMonth] = useState(today.slice(0, 7))
+    const [anchorDate, setAnchorDate] = useState(today)
+    const [compare, setCompare] = useState(false)
     const [includeVAT, setIncludeVAT] = useState(false)
+    const [statusMessage, setStatusMessage] = useState('Report generated for the current month.')
+    const [scheduledFor, setScheduledFor] = useState('')
 
-    const currentMonth = new Date().toISOString().slice(0, 7)
-    const monthStart = `${currentMonth}-01`
-    const monthEnd = new Date(Date.UTC(Number(currentMonth.slice(0, 4)), Number(currentMonth.slice(5, 7)), 0)).toISOString().slice(0, 10)
-    const inMonth = (date?: string) => Boolean(date && date >= monthStart && date <= monthEnd)
-    const monthlySales = useMemo(() => state.sales.filter((sale) => inMonth(sale.date) && sale.status !== 'VOID'), [state.sales, monthStart, monthEnd])
-    const monthlyPurchases = useMemo(() => state.purchases.filter((purchase) => inMonth(purchase.date) && purchase.status !== 'VOID'), [state.purchases, monthStart, monthEnd])
-    const monthlyExpenses = useMemo(() => state.expenses.filter((expense) => inMonth(expense.date) && expense.status !== 'VOID'), [state.expenses, monthStart, monthEnd])
-    const monthlyTransactions = useMemo(() => state.bankTxns.filter((txn) => inMonth(txn.date)), [state.bankTxns, monthStart, monthEnd])
-    const totalRevenue = useMemo(() => monthlySales.reduce((sum, sale) => sum + sale.totalAmount, 0), [monthlySales])
-    const totalExpenses = useMemo(() => monthlyExpenses.reduce((sum, expense) => sum + expense.amount, 0), [monthlyExpenses])
-    const expenseBreakdown = useMemo(() => Array.from(monthlyExpenses.reduce((totals, expense) => totals.set(expense.category || 'Uncategorised', (totals.get(expense.category || 'Uncategorised') || 0) + expense.amount), new Map<string, number>())).map(([category, amount]) => [category, amount] as [string, number]), [monthlyExpenses])
-    const totalPurchases = useMemo(() => monthlyPurchases.reduce((sum, purchase) => sum + purchase.total, 0), [monthlyPurchases])
-    const monthlyPostedEntryIds = new Set(state.journalEntries.filter((entry) => entry.status === 'POSTED' && inMonth(entry.entryDate)).map((entry) => entry.id))
-    const cogsAccountIds = new Set(state.chartOfAccounts.filter((account) => account.name.toLowerCase().includes('cost of goods sold')).map((account) => account.id))
-    const costOfGoodsSold = state.journalLines.filter((line) => cogsAccountIds.has(line.accountId) && monthlyPostedEntryIds.has(line.entryId)).reduce((sum, line) => sum + line.debit - line.credit, 0)
-    const netProfit = totalRevenue - costOfGoodsSold - totalExpenses
-    const inventoryValue = useMemo(() => state.inventory.reduce((sum, item) => sum + item.unitCost * item.closing, 0), [state.inventory])
-    const bankAccounts = Object.entries(state.banks)
-    const totalBankBalance = bankAccounts.reduce((sum, [, balance]) => sum + Number(balance || 0), 0)
-    const cashAccount = state.chartOfAccounts.find((account) => account.name.toLowerCase().includes('cash') && !account.name.toLowerCase().includes('bank'))
-    const cashAccountBalance = cashAccount
-        ? Number(cashAccount.openingBalance || 0) + state.journalLines.filter((line) => line.accountId === cashAccount.id && state.journalEntries.some((entry) => entry.id === line.entryId && entry.status === 'POSTED' && entry.entryDate <= monthEnd)).reduce((sum, line) => sum + line.debit - line.credit, 0)
-        : 0
-    const cashReceived = monthlyTransactions.filter((txn) => Number(txn.amount) > 0).reduce((sum, txn) => sum + Number(txn.amount), 0)
-    const cashPaid = monthlyTransactions.filter((txn) => Number(txn.amount) < 0).reduce((sum, txn) => sum + Math.abs(Number(txn.amount)), 0)
-    const exportReport = useMemo(() => buildManagementAccounts({ ...state, companyName: state.companySettings.companyName, currency: state.companySettings.currency || 'NGN' }, [{ label: currentMonth, startDate: monthStart, endDate: monthEnd }]), [state, currentMonth, monthStart, monthEnd])
+    useEffect(() => {
+        const stored = window.localStorage.getItem(scheduleKey)
+        if (stored) setScheduledFor(stored)
+    }, [])
 
-    const reportExportData = { Period: currentMonth, Revenue: totalRevenue, Purchases: totalPurchases, CostOfGoodsSold: costOfGoodsSold, Expenses: totalExpenses, NetProfit: netProfit, Transactions: monthlySales.length + monthlyPurchases.length + monthlyExpenses.length }
+    const periods = useMemo(() => {
+        const currentPeriod = activeRange === 'Monthly' ? monthPeriod(month) : reportPeriod(activeRange, anchorDate)
+        return compare ? [previousPeriod(currentPeriod), currentPeriod] : [currentPeriod]
+    }, [activeRange, anchorDate, compare, month])
+    const exportReport = useMemo(() => buildManagementAccounts({ ...state, companyName: state.companySettings.companyName, currency: state.companySettings.currency || 'NGN' }, periods), [state, periods])
+    const revenueRow = exportReport.pnl.rows.find((row) => row.label === 'Revenue')
+    const profitRow = exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')
+    const taxInclusive = state.companySettings.taxInclusive !== false
+    const sections = includeVAT ? appendVatSection(managementAccountsToExportSections(exportReport), revenueRow?.values || [], periods.map((period) => period.label), 0.075, taxInclusive) : managementAccountsToExportSections(exportReport)
+    const inventoryValue = state.inventory.reduce((sum, item) => sum + item.unitCost * item.closing, 0)
+    const periodLabel = periods.map((period) => period.label).join(compare ? ' compared with ' : '')
+    const vatAmount = includeVAT ? outputVat(revenueRow?.total || 0, 0.075, taxInclusive) : 0
 
-    const handleAction = (action: string) => {
-        setStatusMessage(`${action} completed for this month.`)
-        triggerAppToast(action, `${action} completed for the current month.`)
+    const exportCurrentReport = (action: 'Export PDF' | 'Export Excel') => {
         if (action === 'Export PDF') {
             void downloadFinancialReportPdf({
-                filename: `monthly-report-${activeRange.toLowerCase()}.pdf`, reportTitle: 'Monthly Report', periodLabel: `${currentMonth} | ${activeRange} view`, companyName: state.companySettings.companyName,
-                highlights: [{ label: 'Revenue', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Revenue')?.total || 0) }, { label: 'Net profit', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')?.total || 0) }, { label: 'Inventory value', value: formatCurrency(inventoryValue) }, { label: 'Cash', value: formatCurrency(exportReport.notes[2]?.at(-1)?.total || 0) }],
-                sections: managementAccountsToExportSections(exportReport),
-                notes: [`Report range: ${activeRange}.`, `VAT is ${includeVAT ? 'included in the report calculation.' : 'not included in this export.'}`, 'Amounts are calculated from non-void records in the selected calendar month.'],
+                filename: `monthly-report-${activeRange.toLowerCase()}.pdf`, reportTitle: 'Monthly Report', periodLabel: `${periodLabel} | ${activeRange} view`, companyName: state.companySettings.companyName,
+                highlights: [{ label: 'Revenue', value: formatCurrency(revenueRow?.total || 0) }, { label: 'Net profit', value: formatCurrency(profitRow?.total || 0) }, { label: 'Inventory value', value: formatCurrency(inventoryValue) }, { label: 'Cash', value: formatCurrency(exportReport.notes[2]?.at(-1)?.total || 0) }, ...(includeVAT ? [{ label: 'Output VAT', value: formatCurrency(vatAmount) }] : [])],
+                sections,
+                notes: [`Report range: ${activeRange}.`, `VAT is ${includeVAT ? 'included in the report calculation.' : 'not included in this export.'}`, 'Amounts are calculated from non-void records in the selected period.'],
             })
         }
-
         if (action === 'Export Excel') {
             setExportCompanyName(state.companySettings.companyName)
-            downloadExcel(`monthly-report-${activeRange.toLowerCase()}.xlsx`, [{ ...reportExportData, Revenue: exportReport.pnl.rows.find((row) => row.label === 'Revenue')?.total || 0, NetProfit: exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')?.total || 0, ...Object.fromEntries(expenseBreakdown.map(([category, amount]) => [`Expense: ${category}`, amount])), action }])
+            downloadExcel(`monthly-report-${activeRange.toLowerCase()}.xlsx`, sectionsToExcelRows(sections))
         }
+    }
+
+    const handleAction = (action: string) => {
+        if (action === 'Compare Months') {
+            const nextCompare = !compare
+            setCompare(nextCompare)
+            const currentPeriod = periods[periods.length - 1]
+            const message = nextCompare ? `Comparing ${previousPeriod(currentPeriod).label} with ${currentPeriod.label}.` : `Showing ${currentPeriod.label} only.`
+            setStatusMessage(message)
+            triggerAppToast('Compare Months', message)
+            return
+        }
+        if (action === 'Schedule Report') {
+            const nextRun = nextReportRun('monthly')
+            window.localStorage.setItem(scheduleKey, nextRun)
+            setScheduledFor(nextRun)
+            const message = `Monthly report scheduled. The next run is ${nextRun}.`
+            setStatusMessage(message)
+            triggerAppToast('Schedule Report', message)
+            return
+        }
+        const message = `${action.replace('+ ', '')} completed for ${periodLabel}.`
+        setStatusMessage(message)
+        triggerAppToast(action, message)
+        if (action === 'Export PDF' || action === 'Export Excel') exportCurrentReport(action)
     }
 
     return (
@@ -71,7 +90,7 @@ export default function MonthlyReportPage() {
                     </div>
                     <div className="page-actions">
                         <button className="action-btn primary" onClick={() => handleAction('+ Generate Report')}>+ Generate Report</button>
-                        <button className="action-btn secondary" onClick={() => handleAction('Compare Months')}>Compare Months</button>
+                        <button className="action-btn secondary" aria-pressed={compare} onClick={() => handleAction('Compare Months')}>{compare ? 'Hide comparison' : 'Compare Months'}</button>
                         <button className="action-btn secondary allow-readonly" onClick={() => handleAction('Export PDF')}>Export PDF</button>
                         <button className="action-btn secondary allow-readonly" onClick={() => handleAction('Export Excel')}>Export Excel</button>
                         <button className="action-btn secondary" onClick={() => handleAction('Schedule Report')}>Schedule Report</button>
@@ -79,14 +98,29 @@ export default function MonthlyReportPage() {
                     </div>
                 </div>
 
+                <div className="management-controls">
+                    <label>Range
+                        <select aria-label="Report range" value={activeRange} onChange={(event) => setActiveRange(event.target.value as ReportRange)}>
+                            <option>Daily</option>
+                            <option>Weekly</option>
+                            <option>Monthly</option>
+                        </select>
+                    </label>
+                    {activeRange === 'Monthly' ? (
+                        <label>Month<input aria-label="Report month" type="month" value={month} onChange={(event) => setMonth(event.target.value || today.slice(0, 7))} /></label>
+                    ) : (
+                        <label>Date<input aria-label="Report date" type="date" value={anchorDate} onChange={(event) => setAnchorDate(event.target.value || today)} /></label>
+                    )}
+                </div>
+
                 <div className="report-card">
                     <div className="card-hd">
                         <div>
                             <div className="card-title">PDF Report Statements</div>
-                            <div className="section-subtitle">The exact statements and values included in the monthly PDF export.</div>
+                            <div className="section-subtitle">{periodLabel}. {statusMessage}{scheduledFor ? ` Next scheduled run: ${scheduledFor}.` : ''}</div>
                         </div>
                     </div>
-                    <FinancialReportSections sections={managementAccountsToExportSections(exportReport)} />
+                    <FinancialReportSections sections={sections} />
                 </div>
             </div>
         </AppLayout>
