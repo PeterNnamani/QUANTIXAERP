@@ -9103,6 +9103,33 @@ html[data-theme='dark'] .pricing-row span {
   border-top: 1px solid var(--border);
 }
 
+.settings-bank-register .bank-register-row {
+  grid-template-columns: minmax(180px, 1.5fr) minmax(100px, 0.8fr) minmax(140px, 1fr) 90px 80px;
+}
+
+.settings-bank-register .bank-register-row>span:nth-child(5) {
+  text-align: right;
+}
+
+.bank-edit-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+.bank-edit-panel {
+  margin: 0 0 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.bank-edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
 .faq-list {
   display: flex;
   flex-direction: column;
@@ -9253,6 +9280,14 @@ html[data-theme='dark'] .pricing-row span {
 
   .bank-register-row>span:nth-child(4)::before {
     content: 'Status';
+  }
+
+  .settings-bank-register .bank-register-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .settings-bank-register .bank-register-row>span:nth-child(5) {
+    align-self: end;
   }
 }
 
