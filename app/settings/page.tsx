@@ -10,6 +10,27 @@ import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipeConfirmationPhrase } from '
 import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
 import { dedupeChartOfAccounts, requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
 
+type BankEditDraft = {
+  institution: string
+  accountName: string
+  accountNumber: string
+  accountType: string
+  currency: string
+  branch: string
+  openingBalance: number
+  openingBalanceDate: string
+  balance: number
+  status: string
+}
+
+const bankAccountTypes = ['Current', 'Savings', 'Cash', 'Wallet', 'Other']
+const bankCurrencies = ['NGN', 'USD', 'GBP']
+
+function bankAccountLabel(account: BankAccount) {
+  const prefix = `${account.institution} — `
+  return account.institution && account.name.startsWith(prefix) ? account.name.slice(prefix.length) : account.name
+}
+
 const sidebarSections = [
   { id: 'company', label: 'Company', description: 'Profile, branding, and legal details' },
   { id: 'business', label: 'Business', description: 'Defaults, dates, and workflow' },
@@ -60,6 +81,9 @@ export default function SettingsPage() {
   const [newBankOpeningBalance, setNewBankOpeningBalance] = useState(0)
   const [newBankOpeningDate, setNewBankOpeningDate] = useState(new Date().toISOString().slice(0, 10))
   const [bankCreationStatus, setBankCreationStatus] = useState('')
+  const [editingBankId, setEditingBankId] = useState<string | null>(null)
+  const [bankEditDraft, setBankEditDraft] = useState<BankEditDraft | null>(null)
+  const [bankEditStatus, setBankEditStatus] = useState('')
   const [settingsNotice, setSettingsNotice] = useState<{ tone: 'error' | 'success'; message: string } | null>(null)
   const [wipeConfirm, setWipeConfirm] = useState('')
   const [closeConfirm, setCloseConfirm] = useState('')
@@ -414,6 +438,79 @@ export default function SettingsPage() {
     setBankCreationStatus(`${accountKey} was created and is now available in Bank Balances.`)
   }
 
+  const openBankEditor = (account: BankAccount) => {
+    setEditingBankId(account.id)
+    setBankEditStatus('')
+    setBankEditDraft({
+      institution: account.institution || account.name,
+      accountName: bankAccountLabel(account),
+      accountNumber: account.accountNumber || '',
+      accountType: account.accountType || 'Current',
+      currency: account.currency || 'NGN',
+      branch: account.branch || '',
+      openingBalance: Number(account.openingBalance || 0),
+      openingBalanceDate: account.openingBalanceDate || '',
+      balance: Number(state.banks[account.name] ?? account.balance ?? 0),
+      status: (account.status || 'active').toLowerCase() === 'active' ? 'active' : 'inactive',
+    })
+  }
+
+  const closeBankEditor = () => {
+    setEditingBankId(null)
+    setBankEditDraft(null)
+    setBankEditStatus('')
+  }
+
+  const updateBankDraft = (updates: Partial<BankEditDraft>) => {
+    setBankEditDraft((current) => (current ? { ...current, ...updates } : current))
+  }
+
+  const handleSaveBankEdit = () => {
+    const existing = state.bankAccounts.find((account) => account.id === editingBankId)
+    if (!bankEditDraft || !existing) return
+    const institution = bankEditDraft.institution.trim()
+    const accountName = bankEditDraft.accountName.trim()
+    if (!institution || !accountName) {
+      setBankEditStatus('Enter both a bank name and account name.')
+      return
+    }
+    const nextName = `${institution} — ${accountName}`
+    const nameTaken = state.bankAccounts.some((account) => account.id !== existing.id && account.name === nextName)
+      || (nextName !== existing.name && state.banks[nextName] !== undefined)
+    if (nameTaken) {
+      setBankEditStatus('Another bank account already uses that name.')
+      return
+    }
+
+    const updated: BankAccount = {
+      ...existing,
+      name: nextName,
+      institution,
+      accountNumber: bankEditDraft.accountNumber.trim(),
+      accountType: bankEditDraft.accountType,
+      currency: bankEditDraft.currency,
+      branch: bankEditDraft.branch.trim(),
+      openingBalance: Number(bankEditDraft.openingBalance || 0),
+      openingBalanceDate: bankEditDraft.openingBalanceDate,
+      balance: Number(bankEditDraft.balance || 0),
+      status: bankEditDraft.status,
+    }
+    const banks = { ...state.banks }
+    delete banks[existing.name]
+    banks[updated.name] = updated.balance
+    const renamed = nextName !== existing.name
+
+    updateState({
+      banks,
+      bankAccounts: state.bankAccounts.map((account) => (account.id === existing.id ? updated : account)),
+      // Bank transactions are linked by account name, so keep them pointing at the renamed account.
+      ...(renamed ? { bankTxns: state.bankTxns.map((txn) => (txn.bank === existing.name ? { ...txn, bank: nextName } : txn)) } : {}),
+    })
+    addAuditLog('UPDATE', 'BANK', updated.name, renamed ? `Updated bank account details and renamed it from ${existing.name}.` : 'Updated bank account details.')
+    closeBankEditor()
+    setBankCreationStatus(`${updated.name} was updated and Bank Balances now shows the new details.`)
+  }
+
   const togglePermission = (permission: PermissionKey) => {
     setRolePermissions((current) =>
       current.includes(permission) ? current.filter((item) => item !== permission) : [...current, permission]
@@ -623,16 +720,26 @@ export default function SettingsPage() {
                   <div className="fg"><label>Bank name</label><input value={newBankName} onChange={(event) => setNewBankName(event.target.value)} placeholder="e.g. Zenith Bank" /></div>
                   <div className="fg"><label>Account name</label><input value={newBankAccountName} onChange={(event) => setNewBankAccountName(event.target.value)} placeholder="Main Business Account" /></div>
                   <div className="fg"><label>Account number <small>(optional)</small></label><input value={newBankAccountNumber} onChange={(event) => setNewBankAccountNumber(event.target.value.replace(/\D/g, '').slice(0, 20))} inputMode="numeric" placeholder="0123456789" /></div>
-                  <div className="fg"><label>Account type</label><select value={newBankAccountType} onChange={(event) => setNewBankAccountType(event.target.value)}><option>Current</option><option>Savings</option><option>Cash</option><option>Wallet</option><option>Other</option></select></div>
-                  <div className="fg"><label>Currency</label><select value={newBankCurrency} onChange={(event) => setNewBankCurrency(event.target.value)}><option>NGN</option><option>USD</option><option>GBP</option></select></div>
+                  <div className="fg"><label>Account type</label><select value={newBankAccountType} onChange={(event) => setNewBankAccountType(event.target.value)}>{bankAccountTypes.map((type) => <option key={type}>{type}</option>)}</select></div>
+                  <div className="fg"><label>Currency</label><select value={newBankCurrency} onChange={(event) => setNewBankCurrency(event.target.value)}>{bankCurrencies.map((currency) => <option key={currency}>{currency}</option>)}</select></div>
                   <div className="fg"><label>Opening balance</label><input type="number" min={0} step="0.01" value={newBankOpeningBalance} onChange={(event) => setNewBankOpeningBalance(Number(event.target.value || 0))} /></div>
                   <div className="fg"><label>Opening balance date</label><input type="date" value={newBankOpeningDate} onChange={(event) => setNewBankOpeningDate(event.target.value)} /></div>
                 </div>
                 {bankCreationStatus && <div className="metric-note">{bankCreationStatus}</div>}
                 <button className="action-btn primary" type="button" onClick={handleCreateBank}>Create bank account</button>
                 <div className="bank-account-register settings-bank-register">
-                  <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening balance</span><span>Status</span></div>
-                  {state.bankAccounts.map((account) => <div className="bank-register-row" key={account.id}><span><strong>{account.name}</strong><small>{account.accountNumber || 'No account number'}</small></span><span>{account.accountType}</span><span>{formatCurrency(account.openingBalance)}</span><span>{account.status}</span></div>)}
+                  <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening balance</span><span>Status</span><span className="bank-register-action">Manage</span></div>
+                  {state.bankAccounts.map((account) => (
+                    <div className="bank-register-row" key={account.id}>
+                      <span><strong>{account.name}</strong><small>{account.accountNumber || 'No account number'}</small></span>
+                      <span>{account.accountType}</span>
+                      <span>{formatCurrency(account.openingBalance)}</span>
+                      <span>{account.status}</span>
+                      <span className="bank-register-action">
+                        <button className="btn btn-sm" type="button" title={`Edit ${account.name}`} onClick={() => openBankEditor(account)}>Edit</button>
+                      </span>
+                    </div>
+                  ))}
                   {state.bankAccounts.length === 0 && <div className="metric-note bank-empty-state">No bank accounts have been created yet.</div>}
                 </div>
               </div>
@@ -682,6 +789,36 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
+
+          {bankEditDraft && (
+            <div className="bank-modal-overlay" role="dialog" aria-modal="true" aria-label="Edit bank account">
+              <div className="card bank-modal-card bank-edit-card">
+                <div className="card-title">Edit bank account</div>
+                <div className="section-subtitle">Every change here lands straight on this account&rsquo;s card in Bank Balances.</div>
+                <div className="bank-form-grid bank-edit-grid">
+                  <label><span>Bank name</span><input value={bankEditDraft.institution} onChange={(event) => updateBankDraft({ institution: event.target.value })} placeholder="e.g. Zenith Bank" /></label>
+                  <label><span>Account name</span><input value={bankEditDraft.accountName} onChange={(event) => updateBankDraft({ accountName: event.target.value })} placeholder="Main Business Account" /></label>
+                  <label><span>Account number</span><input value={bankEditDraft.accountNumber} onChange={(event) => updateBankDraft({ accountNumber: event.target.value.replace(/\D/g, '').slice(0, 20) })} inputMode="numeric" placeholder="0123456789" /></label>
+                  <label><span>Account type</span><select value={bankEditDraft.accountType} onChange={(event) => updateBankDraft({ accountType: event.target.value })}>{bankAccountTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
+                  <label><span>Currency</span><select value={bankEditDraft.currency} onChange={(event) => updateBankDraft({ currency: event.target.value })}>{bankCurrencies.map((currency) => <option key={currency}>{currency}</option>)}</select></label>
+                  <label><span>Branch</span><input value={bankEditDraft.branch} onChange={(event) => updateBankDraft({ branch: event.target.value })} placeholder="Optional" /></label>
+                  <label><span>Opening balance</span><input type="number" step="0.01" value={bankEditDraft.openingBalance} onChange={(event) => updateBankDraft({ openingBalance: Number(event.target.value || 0) })} /></label>
+                  <label><span>Opening balance date</span><input type="date" value={bankEditDraft.openingBalanceDate} onChange={(event) => updateBankDraft({ openingBalanceDate: event.target.value })} /></label>
+                  <label><span>Available balance</span><input type="number" step="0.01" value={bankEditDraft.balance} onChange={(event) => updateBankDraft({ balance: Number(event.target.value || 0) })} /></label>
+                  <label><span>Status</span><select value={bankEditDraft.status} onChange={(event) => updateBankDraft({ status: event.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
+                </div>
+                <div className="bank-edit-preview">
+                  <span>Card name</span>
+                  <strong>{`${bankEditDraft.institution.trim() || 'Bank name'} — ${bankEditDraft.accountName.trim() || 'Account name'}`}</strong>
+                </div>
+                {bankEditStatus && <div className="metric-note">{bankEditStatus}</div>}
+                <div className="btn-group">
+                  <button className="btn btn-secondary" type="button" onClick={closeBankEditor}>Cancel</button>
+                  <button className="btn btn-primary" type="button" onClick={handleSaveBankEdit}>Save changes</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {showImportModal && (
             <div className="import-modal-overlay">
