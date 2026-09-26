@@ -3,6 +3,7 @@
 import AppLayout from '@/components/layout/app-layout'
 import { useEffect, useState } from 'react'
 import { useAccounting } from '@/lib/context'
+import { normalizePlanName } from '@/lib/licensing'
 
 declare global {
     interface Window {
@@ -127,7 +128,7 @@ const plans: PlanCard[] = [
 ]
 
 export default function SubscriptionAndLicensingPage() {
-    const { user } = useAccounting()
+    const { user, activateSubscription } = useAccounting()
     const [loadingPlan, setLoadingPlan] = useState<string | null>(null)
     const [activeSubscription, setActiveSubscription] = useState<ActiveSubscription | null>(null)
     const [message, setMessage] = useState('')
@@ -183,13 +184,15 @@ export default function SubscriptionAndLicensingPage() {
                         })
                         const verification = await verifyResponse.json()
                         if (!verifyResponse.ok) throw new Error(verification.error || 'Payment verification failed.')
+                        const planName = normalizePlanName(verification.subscription.plan_name) || plan.name as 'Growth Edition' | 'Professional Edition' | 'Enterprise Edition'
                         setActiveSubscription({
                             planName: verification.subscription.plan_name,
                             status: verification.subscription.status,
                             startsAt: verification.subscription.starts_at,
                             nextPaymentDate: getNextPaymentDate(verification.subscription.starts_at).toISOString(),
                         })
-                        setMessage(`${plan.name} is now active.`)
+                        activateSubscription({ subscriptionPlan: planName, subscriptionStatus: 'active' })
+                        setMessage(`${planName} is active. Its features are open in the menu now.`)
                     } catch (error) {
                         setMessage(error instanceof Error ? error.message : 'Payment verification failed.')
                     } finally {

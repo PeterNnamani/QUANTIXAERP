@@ -9,6 +9,7 @@ import { canAccessRoute, canEditPermission, getRoutePermission } from '@/lib/rba
 import { planCanAccessRoute } from '@/lib/licensing'
 import Navigation from './navigation'
 import Topbar from './topbar'
+import WorkspaceLoader from './workspace-loader'
 
 type SpeechResultEvent = {
   results: ArrayLike<ArrayLike<{ transcript: string }>>
@@ -259,29 +260,26 @@ export default function AppLayout({ children }: { children: ReactNode }) {
 
 
   if (!user || !subscriptionLoaded) {
-    return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc', color: '#0f172a' }}>
-        <div style={{ textAlign: 'center', padding: '24px 32px', borderRadius: '16px', background: '#ffffff', boxShadow: '0 12px 32px rgba(15, 23, 42, 0.08)' }}>
-          <div style={{ fontSize: '12px', letterSpacing: '0.2em', textTransform: 'uppercase', color: '#475569', marginBottom: '8px' }}>Quantixa</div>
-          <div style={{ fontSize: '22px', fontWeight: 700 }}>Loading your workspace...</div>
-        </div>
-      </div>
-    )
+    return <WorkspaceLoader phase={user ? 'company' : 'session'} />
   }
 
   const hasRoleAccess = canAccessRoute(user, pathname || '/dashboard')
   const hasPlanAccess = pathname?.startsWith('/subscription-and-licensing') || planCanAccessRoute(user.subscriptionPlan, pathname || '/dashboard', user.subscriptionStatus)
 
-  if (!hasRoleAccess || !hasPlanAccess) {
+  if (!hasRoleAccess) {
     return (
       <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}>
         <div className="panel-card" style={{ maxWidth: '420px', textAlign: 'center' }}>
           <div className="eyebrow">Access restricted</div>
-          <h2 className="page-title" style={{ fontSize: '24px', marginBottom: '8px' }}>{!hasRoleAccess ? 'This area is not available for your role.' : 'This feature is not included in your current plan.'}</h2>
-          <p className="page-subtitle">{!hasRoleAccess ? 'Ask a Super Admin to grant access to this module.' : 'Open Subscription & Licensing to compare plans and upgrade your licence.'}</p>
+          <h2 className="page-title" style={{ fontSize: '24px', marginBottom: '8px' }}>This area is not available for your role.</h2>
+          <p className="page-subtitle">Ask a Super Admin to grant access to this module.</p>
         </div>
       </div>
     )
+  }
+
+  if (!hasPlanAccess) {
+    return <WorkspaceLoader phase="dashboard" />
   }
 
   const routePermission = getRoutePermission(pathname || '/dashboard')

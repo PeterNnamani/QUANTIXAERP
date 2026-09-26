@@ -60,9 +60,20 @@ export const PLAN_FEATURES: Record<PlanName, string[]> = {
 }
 
 const ROUTE_MINIMUM_PLANS: Record<string, PlanName> = {
+    '/product-manager': 'Professional Edition',
+    '/reports': 'Professional Edition',
+    '/annual-report': 'Professional Edition',
+    '/asset-schedule': 'Professional Edition',
+    '/prepayments': 'Professional Edition',
+    '/supplier-rebates': 'Professional Edition',
     '/staff-management': 'Professional Edition',
     '/payroll': 'Professional Edition',
     '/role-management': 'Professional Edition',
+    '/tax': 'Enterprise Edition',
+    '/loans': 'Enterprise Edition',
+    '/uba-overdraft': 'Enterprise Edition',
+    '/audit': 'Enterprise Edition',
+    '/backup': 'Enterprise Edition',
 }
 
 export function normalizePlanName(value: unknown): PlanName | null {
@@ -93,4 +104,11 @@ export function getPlanUserLimit(plan: unknown): number | null {
     if (planHasFeature(plan, 'five-users')) return 5
     if (normalizePlanName(plan) === 'Growth Edition') return 1
     return 0
+}
+
+export function seatLimitForSubscription(plan: unknown, subscriptionStatus?: string): number | null {
+    const status = subscriptionStatus?.toLowerCase()
+    if (status === 'trial') return getPlanUserLimit(TRIAL_PLAN)
+    if (status === 'expired' || status === 'cancelled') return 0
+    return getPlanUserLimit(plan)
 }

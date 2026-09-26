@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 import { supabase } from './supabase.browser'
+import WorkspaceLoader from '@/components/layout/workspace-loader'
 import { getDefaultRoles, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
 import { getTrialEndDate, isTrialActive, TRIAL_PLAN, type PlanName } from '@/lib/licensing'
 
@@ -410,6 +411,7 @@ export interface AccountingContextType {
   login: (userData: User, remember: boolean) => void
   logout: () => void
   addAuditLog: (action: string, type: string, reference: string, details: string) => void
+  activateSubscription: (subscription: Pick<User, 'subscriptionPlan' | 'subscriptionStatus' | 'trialEndsAt'>) => void
 }
 
 const AccountingContext = createContext<AccountingContextType | undefined>(undefined)
@@ -1594,6 +1596,22 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const activateSubscription = (subscription: Pick<User, 'subscriptionPlan' | 'subscriptionStatus' | 'trialEndsAt'>) => {
+    setUser((current) => {
+      if (!current) return current
+      const next = {
+        ...current,
+        subscriptionPlan: subscription.subscriptionPlan,
+        subscriptionStatus: subscription.subscriptionStatus,
+        trialEndsAt: subscription.subscriptionStatus === 'active' ? undefined : subscription.trialEndsAt,
+      }
+      const stored = localStorage.getItem(AUTH_KEY)
+      const storage = stored ? localStorage : sessionStorage
+      if (stored || sessionStorage.getItem(AUTH_KEY)) storage.setItem(AUTH_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+
   const logout = () => {
     if (supabase && user?.companyId) {
       void supabase.from('audit_logs').insert({
@@ -1686,14 +1704,11 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     login,
     logout,
     addAuditLog,
+    activateSubscription,
   }
 
   if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-        <div>Loading...</div>
-      </div>
-    )
+    return <WorkspaceLoader phase="session" />
   }
 
   return (
