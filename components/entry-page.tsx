@@ -14,7 +14,7 @@ export default function EntryPage() {
   }, [])
 
   if (hasCompletedOnboarding === null) {
-    return <div style={{ minHeight: '100vh', background: '#f0f4fc' }} aria-hidden="true" />
+    return <div className="auth-boot" aria-hidden="true" />
   }
 
   return hasCompletedOnboarding ? <LoginPage /> : <LandingPage />

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
 import { findStaffMemberByLogin, savedMenuAccess } from '@/lib/rbac'
-import { findUserInDatabase, recordUserLogin } from '@/lib/user-db'
+import { loginWithCredentials, recordUserLogin } from '@/lib/user-db'
 
 const AUTH_KEY = 'hw_auth_user'
 
@@ -41,6 +41,12 @@ export default function LoginPage() {
     const normalizedUsername = username.trim().toUpperCase()
     const normalizedPin = password.trim()
 
+    if (!normalizedUsername || !normalizedPin) {
+      setError('Enter your staff ID and PIN to continue.')
+      setIsLoading(false)
+      return
+    }
+
     const saveRememberedUsername = (remember: boolean) => {
       if (remember) {
         localStorage.setItem('hw_remembered_username', username)
@@ -50,7 +56,8 @@ export default function LoginPage() {
     }
 
     const matchedStaff = findStaffMemberByLogin(state.staffMembers, normalizedUsername, normalizedPin)
-    const databaseUser = await findUserInDatabase(normalizedUsername, normalizedPin, state.roles)
+    const databaseResult = await loginWithCredentials(normalizedUsername, normalizedPin)
+    const databaseUser = databaseResult.user
 
     // Validate credentials against database or staff members
     const localAccess = matchedStaff ? savedMenuAccess({ ...matchedStaff, role: matchedStaff.roleId }) : null
@@ -81,7 +88,9 @@ export default function LoginPage() {
       setIsLoading(false)
       router.push('/dashboard')
     } else {
-      setError('Invalid username or password')
+      setError(databaseResult.error && databaseResult.error !== 'Invalid username or password'
+        ? databaseResult.error
+        : 'Invalid username or password')
       setIsLoading(false)
     }
   }
@@ -149,7 +158,7 @@ export default function LoginPage() {
               />
               <span style={{ marginLeft: 8 }}>Remember me</span>
             </label>
-            <button type="button" className="link" onClick={() => router.push('/onboard')}>Create company</button>
+            <button type="button" className="link" onClick={() => router.push('/onboard?mode=trial')}>Create company</button>
           </div>
           <button
             type="submit"

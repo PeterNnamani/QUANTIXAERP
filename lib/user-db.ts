@@ -1,85 +1,47 @@
-import { getSupabaseClient } from '@/lib/supabase.browser'
-import { explicitAccessLevels, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
+import { type RoleDefinition } from '@/lib/rbac'
 import type { User } from '@/lib/context'
+import type { AuthSessionUser } from '@/lib/auth-user'
 
-export interface DatabaseUserRecord {
-    id?: string
-    company_id?: string | null
-    company_name?: string | null
-    staff_id?: string | null
-    username?: string | null
-    pin?: string | null
-    user_settings?: Record<string, unknown> | null
-    email?: string | null
-    full_name?: string | null
-    role?: string | null
-    role_title?: string | null
-    access_levels?: AccessLevels | null
-    phone?: string | null
-    status?: string | null
-    branch?: string | null
-    department?: string | null
-    position?: string | null
-    employee_id?: string | null
-    salary?: string | null
-    employment_date?: string | null
-    created_at?: string | null
-    updated_at?: string | null
-    last_login?: string | null
+export type { DatabaseUserRecord } from '@/lib/auth-user'
+
+function asUser(user: AuthSessionUser | null | undefined): User | null {
+    return user ? user as User : null
 }
 
 export async function findUserInDatabase(
     staffIdOrUsername: string,
     pin: string,
-    roles: RoleDefinition[],
+    _roles?: RoleDefinition[],
 ): Promise<User | null> {
-    const supabase = getSupabaseClient()
-    if (!supabase) return null
+    const result = await loginWithCredentials(staffIdOrUsername, pin)
+    return result.user
+}
 
-    const normalizedId = staffIdOrUsername.trim().toUpperCase()
-    const normalizedPin = pin.trim()
+export async function loginWithCredentials(staffIdOrUsername: string, pin: string): Promise<{ user: User | null; error?: string }> {
+    try {
+        const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: staffIdOrUsername,
+                pin,
+            }),
+        })
 
-    const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('pin', normalizedPin)
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result?.user) {
+            return {
+                user: null,
+                error: result?.error || (response.ok ? 'Invalid username or password' : 'Unable to sign in right now.'),
+            }
+        }
 
-    if (error) {
-        console.warn('Unable to query users table for login', error)
-        return null
-    }
-
-    const match = (data || []).find((row: DatabaseUserRecord) => {
-        const staffId = String(row.staff_id ?? '').trim().toUpperCase()
-        const username = String(row.username ?? '').trim().toUpperCase()
-        return (staffId === normalizedId || username === normalizedId) && String(row.pin ?? '').trim() === normalizedPin
-    })
-
-    if (!match || !match.company_id) return null
-
-    const roleId = String(match.role || 'cashier')
-    const roleDefinition = roles.find((role) => role.id === roleId)
-
-    return {
-        companyId: String(match.company_id || ''),
-        companyName: match.company_name ? String(match.company_name) : undefined,
-        name: String(match.full_name || match.username || match.staff_id || 'Staff User'),
-        role: roleId,
-        roleId,
-        roleName: match.role_title ? String(match.role_title) : roleDefinition?.name,
-        email: match.email ? String(match.email) : undefined,
-        staffId: match.staff_id ? String(match.staff_id) : undefined,
-        ...(match.access_levels && typeof match.access_levels === 'object' && !Array.isArray(match.access_levels)
-            ? menuAccessFromLevels(explicitAccessLevels(match.access_levels) || {})
-            : {
-            permissions: roleDefinition?.permissions || [],
-            visibleMenus: roleDefinition?.visibleMenus,
-            accessLevels: undefined,
-        }),
-        dataScope: roleDefinition?.dataScope || 'team',
-        username: match.username ? String(match.username) : undefined,
-        pin: match.pin ? String(match.pin) : undefined,
-        userSettings: match.user_settings || undefined,
+        return { user: asUser(result.user), error: undefined }
+    } catch (error) {
+        return {
+            user: null,
+            error: error instanceof Error ? error.message : 'Unable to sign in right now.',
+        }
     }
 }
 
@@ -109,7 +71,7 @@ export async function saveUserToDatabase(payload: {
     fullName: string
     roleId: string
     roleTitle?: string
-    accessLevels?: AccessLevels
+    accessLevels?: User['accessLevels']
     email?: string
     phone?: string
     branch?: string

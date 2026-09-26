@@ -1035,38 +1035,42 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
   // Load from localStorage or sessionStorage on mount
   useEffect(() => {
-    const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
-    let companyId = user?.companyId
+    try {
+      const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
+      let companyId = user?.companyId
 
-    if (savedUser) {
-      try {
-        const parsed = JSON.parse(savedUser)
-        const enriched = enrichStoredUser(parsed)
-        companyId = enriched.companyId || companyId
-        setUser(enriched)
-        // persist back the enriched user so other sessions/readers get visibleMenus
-        const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
-        storage.setItem(AUTH_KEY, JSON.stringify(enriched))
-      } catch (e) {
-        setUser(JSON.parse(savedUser))
+      if (savedUser) {
+        try {
+          const parsed = JSON.parse(savedUser)
+          const enriched = enrichStoredUser(parsed)
+          companyId = enriched.companyId || companyId
+          setUser(enriched)
+          const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
+          storage.setItem(AUTH_KEY, JSON.stringify(enriched))
+        } catch (e) {
+          console.warn('Unable to restore saved user', e)
+        }
       }
+      const savedState = companyId
+        ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
+        : null
+      if (savedState) {
+        const parsedState = JSON.parse(savedState)
+        setState({
+          ...defaultState,
+          ...parsedState,
+          companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
+          expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
+          inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
+          roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
+          staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
+        })
+      }
+    } catch (e) {
+      console.warn('Unable to restore workspace session', e)
+    } finally {
+      setIsLoading(false)
     }
-    const savedState = companyId
-      ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
-      : null
-    if (savedState) {
-      const parsedState = JSON.parse(savedState)
-      setState({
-        ...defaultState,
-        ...parsedState,
-        companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
-        expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
-        inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
-        roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
-        staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
-      })
-    }
-    setIsLoading(false)
   }, [user?.companyId])
 
   const updateState = (updates: Partial<AppState>, options: { persist?: boolean } = {}) => {

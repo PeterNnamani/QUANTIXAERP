@@ -1,15 +1,15 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
-import { findUserInDatabase } from '@/lib/user-db'
+import { loginWithCredentials } from '@/lib/user-db'
 import { ONBOARDING_COMPLETED_KEY } from '@/components/entry-page'
 
-export default function OnboardPage() {
+function OnboardForm() {
     const router = useRouter()
     const searchParams = useSearchParams()
-    const { login, state } = useAccounting()
+    const { login } = useAccounting()
     const selectedPlan = searchParams.get('plan')
     const isTrial = searchParams.get('mode') === 'trial' || !selectedPlan
 
@@ -20,55 +20,65 @@ export default function OnboardPage() {
     const [pin, setPin] = useState('')
     const [error, setError] = useState('')
     const [loading, setLoading] = useState(false)
-    const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true)
-
-    useEffect(() => {
-        if (window.localStorage.getItem(ONBOARDING_COMPLETED_KEY) === 'true') {
-            router.replace('/login')
-            return
-        }
-
-        setIsCheckingOnboarding(false)
-    }, [router])
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
         setError('')
+
+        const nextCompanyName = companyName.trim()
+        const nextAdminName = adminFullName.trim()
+        const nextUsername = username.trim()
+        const nextPin = pin.trim()
+
+        if (!nextCompanyName || !nextAdminName || !nextUsername || !nextPin) {
+            setError('Company name, admin name, username, and PIN are required.')
+            return
+        }
+
+        if (nextPin.length < 4 || nextPin.length > 6) {
+            setError('PIN must be 4 to 6 characters.')
+            return
+        }
+
         setLoading(true)
 
         try {
             const resp = await fetch('/api/onboard/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ companyName, adminFullName, adminEmail, username, pin }),
+                body: JSON.stringify({
+                    companyName: nextCompanyName,
+                    adminFullName: nextAdminName,
+                    adminEmail: adminEmail.trim(),
+                    username: nextUsername,
+                    pin: nextPin,
+                }),
             })
-            const data = await resp.json()
+            const data = await resp.json().catch(() => null)
             if (!resp.ok) {
-                setError(data.error || 'Registration failed')
+                setError(data?.error || 'Registration failed')
                 setLoading(false)
                 return
             }
 
             window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, 'true')
 
-            // Try to auto-login the created admin
-            const dbUser = await findUserInDatabase((username).toUpperCase(), pin, state.roles)
-            if (dbUser) {
-                login(dbUser, true)
+            const createdUser = data?.user
+            const signedInUser = createdUser || (await loginWithCredentials(nextUsername, nextPin)).user
+            if (signedInUser) {
+                login(signedInUser, true)
                 router.push(selectedPlan ? `/subscription-and-licensing?plan=${encodeURIComponent(selectedPlan)}` : '/dashboard')
                 return
             }
 
-            setError('Registration complete. Please sign in.')
+            setError(data?.staffId
+                ? `Registration complete. Sign in with ${nextUsername} or ${data.staffId}.`
+                : 'Registration complete. Please sign in.')
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err))
         }
 
         setLoading(false)
-    }
-
-    if (isCheckingOnboarding) {
-        return <div style={{ minHeight: '100vh', background: '#f0f4fc' }} aria-hidden="true" />
     }
 
     return (
@@ -137,9 +147,17 @@ export default function OnboardPage() {
                 </div>
 
                 <div style={{ marginTop: 12 }}>
-                    <button type="button" className="link" onClick={() => router.push('/')} style={{ padding: 0 }}>Already have an account? Sign in</button>
+                    <button type="button" className="link" onClick={() => router.push('/login')} style={{ padding: 0 }}>Already have an account? Sign in</button>
                 </div>
             </div>
         </div>
+    )
+}
+
+export default function OnboardPage() {
+    return (
+        <Suspense fallback={<div className="auth-boot" aria-hidden="true" />}>
+            <OnboardForm />
+        </Suspense>
     )
 }
