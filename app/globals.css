@@ -11476,3 +11476,75 @@ html {
     border-radius: 24px;
   }
 }
+
+.settings-account {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sidebar-item.account {
+  border-color: rgba(185, 28, 28, 0.28);
+}
+
+.settings-danger-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid rgba(185, 28, 28, 0.28);
+  border-radius: 16px;
+  background: #fff;
+}
+
+.settings-danger-card p,
+.settings-account .panel-subtitle {
+  margin: 6px 0 0;
+  color: var(--text2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.settings-danger-card.severe {
+  background: #fff7f7;
+}
+
+.action-btn.danger {
+  align-self: flex-start;
+  border: 1px solid #b91c1c;
+  background: #b91c1c;
+  color: #fff;
+}
+
+.action-btn.danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.bank-card.is-selected {
+  outline: 3px solid rgba(255, 255, 255, 0.85);
+  outline-offset: -6px;
+}
+
+.bank-card {
+  cursor: pointer;
+}
+
+.bank-share {
+  height: 8px;
+  margin: -4px 0 10px;
+  border-radius: 999px;
+  background: rgba(26, 58, 124, 0.08);
+  overflow: hidden;
+}
+
+.bank-share span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1a3a7c;
+}
+
+.bank-share.out span {
+  background: #b45309;
+}

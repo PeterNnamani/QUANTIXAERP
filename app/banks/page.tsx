@@ -2,32 +2,31 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
-import { useAccounting, type BankAccount } from '@/lib/context'
+import { useAccounting } from '@/lib/context'
 import { formatCurrency, triggerAppToast } from '@/lib/utils'
 import { downloadExcel, downloadPdf } from '@/lib/export-utils'
+import { applyBankMovements, displayBankAccounts, maskAccountNumber } from '@/lib/bank-ledger'
 import { Repeat, Download, Filter, ArrowDown, ArrowUp, CheckCircle2 } from 'lucide-react'
 
-const bankStyles: Record<string, { background: string; accent: string }> = {
-  'Globus Bank': {
-    background: 'linear-gradient(135deg, #1a3a7c 0%, #0f2456 100%)',
-    accent: 'rgba(255, 255, 255, 0.92)',
-  },
-  'Access Bank': {
-    background: 'linear-gradient(135deg, #064d42 0%, #0d7a54 100%)',
-    accent: 'rgba(255, 255, 255, 0.92)',
-  },
-  'Zenith Bank': {
-    background: 'linear-gradient(135deg, #f4a261 0%, #d1492c 100%)',
-    accent: 'rgba(255, 255, 255, 0.92)',
-  },
-  UBA: {
-    background: 'linear-gradient(135deg, #d11f2b 0%, #7f1d1d 100%)',
-    accent: 'rgba(255, 255, 255, 0.92)',
-  },
-  'First Bank': {
-    background: 'linear-gradient(135deg, #1a3a7c 0%, #c9a227 100%)',
-    accent: 'rgba(255, 255, 255, 0.92)',
-  },
+const knownBankStyles: Record<string, string> = {
+  'Globus Bank': 'linear-gradient(135deg, #1a3a7c 0%, #0f2456 100%)',
+  'Access Bank': 'linear-gradient(135deg, #064d42 0%, #0d7a54 100%)',
+  'Zenith Bank': 'linear-gradient(135deg, #b45309 0%, #9a3412 100%)',
+  UBA: 'linear-gradient(135deg, #b91c1c 0%, #7f1d1d 100%)',
+  'First Bank': 'linear-gradient(135deg, #1a3a7c 0%, #854d0e 100%)',
+}
+
+const palette = [
+  'linear-gradient(135deg, #1a3a7c 0%, #0f2456 100%)',
+  'linear-gradient(135deg, #0f3d4c 0%, #155e75 100%)',
+  'linear-gradient(135deg, #3f3f46 0%, #1f2937 100%)',
+  'linear-gradient(135deg, #1e3a5f 0%, #334155 100%)',
+]
+
+function cardBackground(institution: string) {
+  if (knownBankStyles[institution]) return knownBankStyles[institution]
+  const index = [...institution].reduce((sum, char) => sum + char.charCodeAt(0), 0) % palette.length
+  return palette[index]
 }
 
 export default function BanksPage() {
@@ -41,56 +40,86 @@ export default function BanksPage() {
   const [transferSource, setTransferSource] = useState('')
   const [transferTarget, setTransferTarget] = useState('')
   const [transferAmount, setTransferAmount] = useState(0)
+  const [filterQuery, setFilterQuery] = useState('')
+  const [filterInstitution, setFilterInstitution] = useState('All Banks')
+  const [filterType, setFilterType] = useState('All Types')
+  const [filterStatus, setFilterStatus] = useState('All Status')
+  const [selectedBankId, setSelectedBankId] = useState<string | null>(null)
 
-  const totalBanks = Object.values(state.banks).reduce((sum, b) => sum + b, 0)
-  const bankAccounts = Object.entries(state.banks).map(([bank, balance]) => ({
-    bank,
-    balance,
-    style: bankStyles[bank] || bankStyles['Globus Bank'],
-  }))
-  const activeBank = bankAccounts[0]
-  const [selectedBank, setSelectedBank] = useState<string | null>(activeBank?.bank ?? null)
-
-  useEffect(() => {
-    if (!selectedBank && activeBank) {
-      setSelectedBank(activeBank.bank)
-    }
-  }, [activeBank, selectedBank])
-
-  const selectedAccount = bankAccounts.find((account) => account.bank === selectedBank) || activeBank
-  const legacyAccounts: BankAccount[] = Object.entries(state.banks)
-    .filter(([name]) => !state.bankAccounts.some((account) => account.name === name))
-    .map(([name, balance]) => ({ id: name, name, institution: name, accountNumber: '', accountType: 'Bank account', currency: 'NGN', branch: '', openingBalance: balance, openingBalanceDate: '', balance, status: 'active' }))
-  const pendingDeposits = state.bankTxns.filter((txn) => txn.amount > 0 && txn.status !== 'Completed').reduce((sum, txn) => sum + txn.amount, 0)
-  const pendingWithdrawals = state.bankTxns.filter((txn) => txn.amount < 0 && txn.status !== 'Completed').reduce((sum, txn) => sum + Math.abs(txn.amount), 0)
+  const accounts = useMemo(
+    () => displayBankAccounts(state.banks, state.bankAccounts),
+    [state.banks, state.bankAccounts],
+  )
+  const institutions = [...new Set(accounts.map((account) => account.institution))]
+  const accountTypes = [...new Set(accounts.map((account) => account.accountType))]
+  const visibleAccounts = accounts.filter((account) => {
+    const query = filterQuery.trim().toLowerCase()
+    const matchesQuery = !query || [account.name, account.institution, account.accountNumber, account.currency, account.branch].join(' ').toLowerCase().includes(query)
+    const matchesInstitution = filterInstitution === 'All Banks' || account.institution === filterInstitution
+    const matchesType = filterType === 'All Types' || account.accountType === filterType
+    const matchesStatus = filterStatus === 'All Status' || account.status.toLowerCase() === filterStatus.toLowerCase()
+    return matchesQuery && matchesInstitution && matchesType && matchesStatus
+  })
+  const totalBanks = accounts.reduce((sum, account) => sum + Number(account.balance || 0), 0)
+  const largestAccount = [...accounts].sort((left, right) => right.balance - left.balance)[0]
+  const selectedAccount = visibleAccounts.find((account) => account.id === selectedBankId) || visibleAccounts[0] || accounts[0]
+  const accountTransactions = state.bankTxns.filter((txn) => !selectedAccount || txn.bank === selectedAccount.name)
+  const pendingDeposits = accountTransactions.filter((txn) => txn.amount > 0 && txn.status !== 'Completed').reduce((sum, txn) => sum + txn.amount, 0)
+  const pendingWithdrawals = accountTransactions.filter((txn) => txn.amount < 0 && txn.status !== 'Completed').reduce((sum, txn) => sum + Math.abs(txn.amount), 0)
   const reconciliationDue = state.bankTxns.filter((txn) => txn.status !== 'Completed').length
-  const moneyIn = state.bankTxns.filter((txn) => txn.amount > 0).reduce((sum, txn) => sum + txn.amount, 0)
-  const moneyOut = state.bankTxns.filter((txn) => txn.amount < 0).reduce((sum, txn) => sum + Math.abs(txn.amount), 0)
+  const moneyIn = accountTransactions.filter((txn) => txn.amount > 0).reduce((sum, txn) => sum + txn.amount, 0)
+  const moneyOut = accountTransactions.filter((txn) => txn.amount < 0).reduce((sum, txn) => sum + Math.abs(txn.amount), 0)
+  const flowTotal = Math.max(moneyIn + moneyOut, 1)
   const salesTotal = state.sales.filter((sale) => sale.status !== 'VOID').reduce((sum, sale) => sum + sale.totalAmount, 0)
   const receivablesTotal = state.receivables.reduce((sum, item) => sum + Number(item.outstandingAmount ?? item.amount ?? 0), 0)
   const payablesTotal = state.payables.reduce((sum, item) => sum + Number(item.outstandingAmount ?? item.amount ?? 0), 0)
   const expensesTotal = state.expenses.filter((expense) => expense.status !== 'VOID').reduce((sum, expense) => sum + expense.amount, 0)
 
+  useEffect(() => {
+    if (!selectedBankId && accounts[0]) setSelectedBankId(accounts[0].id)
+  }, [accounts, selectedBankId])
+
+  const exportRows = visibleAccounts.map((account) => ({
+    Bank: account.institution,
+    Account: account.name,
+    Number: account.accountNumber || '',
+    Type: account.accountType,
+    Currency: account.currency,
+    Branch: account.branch || '',
+    'Opening balance': account.openingBalance,
+    'Available balance': account.balance,
+    Status: account.status,
+  }))
+
   const openTransferModal = () => {
-    if (bankAccounts.length < 2) {
+    if (accounts.length < 2) {
       triggerAppToast('Transfer Funds', 'Create at least two bank accounts before transferring funds.')
       return
     }
-    setTransferSource(bankAccounts[0].bank)
-    setTransferTarget(bankAccounts[1]?.bank ?? bankAccounts[0].bank)
+    setTransferSource(accounts[0].name)
+    setTransferTarget(accounts[1].name)
     setTransferAmount(0)
     setShowTransferModal(true)
   }
-
 
   const submitTransferFunds = () => {
     if (transferAmount <= 0) {
       triggerAppToast('Transfer Funds', 'Enter a transfer amount before continuing.')
       return
     }
-    const updatedBanks = { ...state.banks }
-    updatedBanks[transferSource] = Math.max(0, (updatedBanks[transferSource] ?? 0) - transferAmount)
-    updatedBanks[transferTarget] = (updatedBanks[transferTarget] ?? 0) + transferAmount
+    if (transferSource === transferTarget) {
+      triggerAppToast('Transfer Funds', 'Choose two different accounts.')
+      return
+    }
+    const sourceBalance = accounts.find((account) => account.name === transferSource)?.balance ?? 0
+    if (transferAmount > sourceBalance) {
+      triggerAppToast('Transfer Funds', 'That amount is higher than the available balance.')
+      return
+    }
+    const moved = applyBankMovements(state, [
+      { name: transferSource, delta: -transferAmount },
+      { name: transferTarget, delta: transferAmount },
+    ])
     const txns = [
       {
         id: `TXN-${Date.now()}`,
@@ -119,84 +148,45 @@ export default function BanksPage() {
         bank: transferTarget,
       },
     ]
-    updateState({ banks: updatedBanks, bankTxns: [...txns, ...state.bankTxns] })
-    addAuditLog('TRANSFER', 'BANK', 'BANK-TRF', 'Inter-bank transfer executed between two accounts.')
-    triggerAppToast('Transfer Funds', 'Inter-bank transfer completed successfully.')
+    updateState({ ...moved, bankTxns: [...txns, ...state.bankTxns] })
+    addAuditLog('TRANSFER', 'BANK', 'BANK-TRF', `Transferred ${formatCurrency(transferAmount)} from ${transferSource} to ${transferTarget}.`)
+    triggerAppToast('Transfer Funds', 'Inter-bank transfer completed.')
     setShowTransferModal(false)
   }
 
-  const openReconcileModal = () => setShowReconcileModal(true)
-
   const confirmReconcile = () => {
-    const updatedBanks = { ...state.banks }
     const reconciledTxns = state.bankTxns.map((txn) => ({
       ...txn,
-      status: txn.status === 'Processing' ? 'Completed' : txn.status,
+      status: txn.status === 'Processing' || txn.status === 'Pending' ? 'Completed' : txn.status,
     }))
-    updateState({ banks: updatedBanks, bankTxns: reconciledTxns })
-    addAuditLog('RECONCILE', 'BANK', 'BANK-RECON', 'Manual reconciliation completed for bank accounts.')
-    triggerAppToast('Reconcile Account', 'Bank accounts have been reconciled.')
+    updateState({ bankTxns: reconciledTxns })
+    addAuditLog('RECONCILE', 'BANK', 'BANK-RECON', 'Marked pending bank transactions as completed.')
+    triggerAppToast('Reconcile Account', 'Pending transactions were marked completed. Balances were not changed.')
     setShowReconcileModal(false)
   }
 
-  const openReportModal = (action: string) => setActiveReportModal(action)
-
   const confirmReportAction = () => {
     if (!activeReportModal) return
-    addAuditLog('REPORT', 'BANK', activeReportModal.toUpperCase().replace(/ /g, '_'), `${activeReportModal} generated from bank balances.`)
-    triggerAppToast(activeReportModal, `${activeReportModal} is ready.`)
+    const stamp = new Date().toISOString().slice(0, 10)
+    if (activeReportModal === 'Bank Statement') {
+      const rows = (selectedAccount ? state.bankTxns.filter((txn) => txn.bank === selectedAccount.name) : state.bankTxns)
+        .map((txn) => ({ Date: txn.date, Account: txn.bank, Description: txn.description || txn.activity, Type: txn.type, Amount: txn.amount, Status: txn.status }))
+      downloadPdf(`bank-statement-${stamp}.pdf`, 'Bank Statement', rows, companyName)
+    } else if (activeReportModal === 'Cash Flow Report') {
+      downloadPdf(`cash-flow-${stamp}.pdf`, 'Cash Flow Report', [{ Account: selectedAccount?.name || 'All accounts', 'Money in': moneyIn, 'Money out': moneyOut, 'Net cash': moneyIn - moneyOut }], companyName)
+    } else if (activeReportModal === 'Reconciliation Report') {
+      const rows = state.bankTxns.filter((txn) => txn.status !== 'Completed').map((txn) => ({ Date: txn.date, Account: txn.bank, Description: txn.description || txn.activity, Amount: txn.amount, Status: txn.status }))
+      downloadPdf(`reconciliation-${stamp}.pdf`, 'Reconciliation Report', rows, companyName)
+    } else if (activeReportModal === 'Transfer History') {
+      const rows = state.bankTxns.filter((txn) => txn.type === 'Transfer').map((txn) => ({ Date: txn.date, Account: txn.bank, Description: txn.description || txn.activity, Amount: txn.amount, Status: txn.status }))
+      downloadPdf(`transfers-${stamp}.pdf`, 'Transfer History', rows, companyName)
+    } else {
+      downloadPdf(`bank-summary-${stamp}.pdf`, 'Bank Summary', exportRows, companyName)
+    }
+    addAuditLog('REPORT', 'BANK', activeReportModal.toUpperCase().replace(/ /g, '_'), `${activeReportModal} downloaded.`)
+    triggerAppToast(activeReportModal, `${activeReportModal} downloaded.`)
     setActiveReportModal(null)
   }
-
-  const handleBankAction = (action: string) => {
-    if (action === 'Export') {
-      setShowExportDropdown((current) => !current)
-      setShowFilters(false)
-      return
-    }
-
-    if (action === 'Print') {
-      downloadPdf('bank-report.pdf', 'Bank Report', Object.entries(state.banks).map(([bank, balance]) => ({ bank, balance })), companyName)
-      addAuditLog('PRINT', 'BANK', 'BANK_PRINT', 'Bank report downloaded as PDF.')
-      triggerAppToast('Print', 'Bank report downloaded successfully.')
-      return
-    }
-
-    if (action === 'Reconcile Account') {
-      openReconcileModal()
-      return
-    }
-
-    if (action === 'Bank Statement' || action === 'Cash Flow Report' || action === 'Reconciliation Report' || action === 'Bank Summary' || action === 'Transfer History') {
-      openReportModal(action)
-      return
-    }
-
-    if (action === 'Filters') {
-      setShowFilters((current) => !current)
-      setShowExportDropdown(false)
-      return
-    }
-
-    triggerAppToast(action, 'The bank workspace action has been queued and logged.')
-  }
-
-  const applyFilters = () => {
-    triggerAppToast('Filters applied', 'Your bank account filters have been applied.')
-    setShowFilters(false)
-  }
-
-  const handleViewBank = (bank: string) => {
-    setSelectedBank(bank)
-    triggerAppToast('View Bank', `Viewing details for ${bank}`)
-  }
-
-  const handleFilterOption = (label: string) => {
-    addAuditLog('FILTER', 'BANK', label.toUpperCase().replace(/ /g, '_'), `${label} filter button clicked.`)
-    triggerAppToast('Filter', `${label} filter option selected.`)
-  }
-
-  const recentTransactions = state.bankTxns.slice(0, 10)
 
   return (
     <AppLayout>
@@ -204,218 +194,148 @@ export default function BanksPage() {
         <div className="bank-header">
           <div>
             <div className="pg-title">Bank Balances</div>
-            <div className="pg-subtitle">Monitor all company bank accounts, cash balances, and account performance in real time.</div>
+            <div className="pg-subtitle">Live balances for the accounts saved on {companyName}.</div>
           </div>
           <div className="bank-actions">
-            <button
-              className="btn btn-secondary"
-              title={bankAccounts.length < 2 ? 'Create at least two bank accounts first' : 'Transfer funds between accounts'}
-              disabled={bankAccounts.length < 2}
-              onClick={openTransferModal}
-            >
+            <button className="btn btn-secondary" title={accounts.length < 2 ? 'Create at least two bank accounts first' : 'Transfer funds between accounts'} disabled={accounts.length < 2} onClick={openTransferModal}>
               <Repeat size={16} style={{ marginRight: 6 }} /> Transfer Funds
             </button>
-            <button className="btn btn-secondary" title="Reconcile account balances" onClick={openReconcileModal}>
+            <button className="btn btn-secondary" title="Mark pending transactions completed" onClick={() => setShowReconcileModal(true)}>
               <CheckCircle2 size={16} style={{ marginRight: 6 }} /> Reconcile Account
             </button>
-            <button className="btn btn-secondary" title="Toggle bank account filters" onClick={() => handleBankAction('Filters')}>
+            <button className="btn btn-secondary" title="Filter bank accounts" onClick={() => { setShowFilters((current) => !current); setShowExportDropdown(false) }}>
               <Filter size={16} style={{ marginRight: 6 }} /> Filters
             </button>
             <div className="export-dropdown" aria-expanded={showExportDropdown ? 'true' : 'false'}>
-              <button className="btn btn-secondary export-toggle allow-readonly" type="button" title="Export bank account data" onClick={() => handleBankAction('Export')}>
+              <button className="btn btn-secondary export-toggle allow-readonly" type="button" title="Export bank account data" onClick={() => { setShowExportDropdown((current) => !current); setShowFilters(false) }}>
                 <Download size={16} style={{ marginRight: 6 }} /> Export <ArrowDown size={14} className="export-arrow" />
               </button>
               {showExportDropdown && (
                 <div className="dropdown-menu">
-                  <button type="button" className="dropdown-item allow-readonly" onClick={() => {
-                    downloadPdf('banks-report.pdf', 'Bank Balances', Object.entries(state.banks).map(([bank, balance]) => ({ bank, balance })), companyName)
-                    setShowExportDropdown(false)
-                    triggerAppToast('Export PDF', 'Bank balances PDF downloaded successfully.')
-                  }}>
+                  <button type="button" className="dropdown-item allow-readonly" onClick={() => { downloadPdf('banks-report.pdf', 'Bank Balances', exportRows, companyName); setShowExportDropdown(false) }}>
                     <span className="dropdown-icon">PDF</span>Export PDF
                   </button>
-                  <button type="button" className="dropdown-item allow-readonly" onClick={() => {
-                    downloadExcel('banks-report.xlsx', Object.entries(state.banks).map(([bank, balance]) => ({ bank, balance })))
-                    setShowExportDropdown(false)
-                    triggerAppToast('Export Excel', 'Bank balances Excel downloaded successfully.')
-                  }}>
+                  <button type="button" className="dropdown-item allow-readonly" onClick={() => { downloadExcel('banks-report.xlsx', exportRows); setShowExportDropdown(false) }}>
                     <span className="dropdown-icon">XLSX</span>Export Excel
                   </button>
                 </div>
               )}
             </div>
-            <button className="btn btn-secondary" title="Print bank account report" onClick={() => handleBankAction('Print')}>
+            <button className="btn btn-secondary" title="Print bank account report" onClick={() => { downloadPdf('bank-report.pdf', 'Bank Report', exportRows, companyName); addAuditLog('PRINT', 'BANK', 'BANK_PRINT', 'Bank report downloaded as PDF.') }}>
               <ArrowUp size={16} style={{ marginRight: 6 }} /> Print
             </button>
           </div>
         </div>
 
         <div className="bank-card-grid">
-          {bankAccounts.length > 0 ? (
-            bankAccounts.map(({ bank, balance, style }) => (
-              <article key={bank} className="bank-card" style={{ background: style.background }}>
-                <div className="bank-card-top">
-                  <div className="bank-card-chip" />
-                  <div className="bank-card-logo">{bank}</div>
-                </div>
-                <div>
-                  <div className="bank-card-balance-label">Available Balance</div>
-                  <div className="bank-card-balance">{formatCurrency(balance)}</div>
-                </div>
-              </article>
-            ))
-          ) : (
-            <article className="bank-card bank-card-empty">
+          {visibleAccounts.length > 0 ? visibleAccounts.map((account) => (
+            <article key={account.id} className={`bank-card ${selectedAccount?.id === account.id ? 'is-selected' : ''}`} style={{ background: cardBackground(account.institution) }} onClick={() => setSelectedBankId(account.id)}>
               <div className="bank-card-top">
-                <div className="bank-card-logo">No Bank Accounts</div>
+                <div className="bank-card-chip" />
+                <div className="bank-card-logo">{account.institution}</div>
               </div>
-              <div>
-                <div className="bank-card-balance-label">Create a bank account to get started.</div>
+              <div className="bank-card-number">{maskAccountNumber(account.accountNumber)}</div>
+              <div className="bank-card-footer">
+                <div>
+                  <div className="bank-card-balance-label">Available balance</div>
+                  <div className="bank-card-balance">{formatCurrency(account.balance)}</div>
+                  <div className="bank-card-account">{account.name}</div>
+                  <div className="bank-card-type">{account.accountType} · {account.currency}{account.branch ? ` · ${account.branch}` : ''}</div>
+                </div>
               </div>
+            </article>
+          )) : (
+            <article className="bank-card bank-card-empty" style={{ background: '#1a3a7c' }}>
+              <div className="bank-card-top"><div className="bank-card-logo">No bank accounts</div></div>
+              <div className="bank-card-balance-label">{accounts.length === 0 ? 'Create an account in Settings to start tracking cash.' : 'No accounts match these filters.'}</div>
             </article>
           )}
         </div>
 
         <div className="summary-grid">
-          <div className="mini-card">
-            <div className="mini-title">Total Bank Balance</div>
-            <div className="metric-value pos">{formatCurrency(totalBanks)}</div>
-          </div>
-          <div className="mini-card">
-            <div className="mini-title">Largest Account</div>
-            <div className="metric-value pos">{activeBank ? `${activeBank.bank} (${formatCurrency(activeBank.balance)})` : 'None'}</div>
-          </div>
-          <div className="mini-card">
-            <div className="mini-title">Pending Deposits</div>
-            <div className="metric-value pos">{formatCurrency(pendingDeposits)}</div>
-          </div>
-          <div className="mini-card">
-            <div className="mini-title">Pending Withdrawals</div>
-            <div className="metric-value neg">{formatCurrency(pendingWithdrawals)}</div>
-          </div>
-          <div className="mini-card">
-            <div className="mini-title">Reconciliations Pending</div>
-            <div className="metric-value pos">{reconciliationDue}</div>
-          </div>
-          <div className="mini-card">
-            <div className="mini-title">Active Bank Accounts</div>
-            <div className="metric-value pos">{bankAccounts.length}</div>
-          </div>
+          <div className="mini-card"><div className="mini-title">Total bank balance</div><div className="metric-value pos">{formatCurrency(totalBanks)}</div></div>
+          <div className="mini-card"><div className="mini-title">Largest account</div><div className="metric-value pos">{largestAccount ? `${largestAccount.institution} (${formatCurrency(largestAccount.balance)})` : 'None'}</div></div>
+          <div className="mini-card"><div className="mini-title">Pending deposits</div><div className="metric-value pos">{formatCurrency(pendingDeposits)}</div></div>
+          <div className="mini-card"><div className="mini-title">Pending withdrawals</div><div className="metric-value neg">{formatCurrency(pendingWithdrawals)}</div></div>
+          <div className="mini-card"><div className="mini-title">Reconciliations pending</div><div className="metric-value pos">{reconciliationDue}</div></div>
+          <div className="mini-card"><div className="mini-title">Active bank accounts</div><div className="metric-value pos">{accounts.filter((account) => account.status.toLowerCase() === 'active').length}</div></div>
         </div>
 
         {showFilters && (
           <div className="bank-filter-panel card">
-            <div className="card-hd">
-              <div className="card-title">Filter Bank Accounts</div>
-            </div>
+            <div className="card-hd"><div className="card-title">Filter bank accounts</div></div>
             <div className="bank-form-grid">
-              <label>
-                <span>Search</span>
-                <input type="search" placeholder="Search account name, number, bank or currency..." />
-              </label>
-              <label>
-                <span>Filter by Bank</span>
-                <select>
-                  <option>All Banks</option>
-                  {bankAccounts.map((account) => (<option key={account.bank}>{account.bank}</option>))}
-                </select>
-              </label>
-              <label>
-                <span>Filter by Account Type</span>
-                <select>
-                  <option>All Types</option>
-                  <option>Current</option>
-                  <option>Savings</option>
-                </select>
-              </label>
-              <label>
-                <span>Filter by Status</span>
-                <select>
-                  <option>All Status</option>
-                  <option>Active</option>
-                  <option>Inactive</option>
-                </select>
-              </label>
+              <label><span>Search</span><input type="search" value={filterQuery} placeholder="Account name, number, bank, or currency" onChange={(event) => setFilterQuery(event.target.value)} /></label>
+              <label><span>Bank</span><select value={filterInstitution} onChange={(event) => setFilterInstitution(event.target.value)}><option>All Banks</option>{institutions.map((institution) => <option key={institution}>{institution}</option>)}</select></label>
+              <label><span>Account type</span><select value={filterType} onChange={(event) => setFilterType(event.target.value)}><option>All Types</option>{accountTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
+              <label><span>Status</span><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>All Status</option><option>Active</option><option>Inactive</option></select></label>
             </div>
             <div className="btn-group" style={{ justifyContent: 'flex-end', gap: 8 }}>
-              <button className="btn btn-primary" type="button" onClick={applyFilters}>Apply Filters</button>
-              <button className="btn btn-secondary" type="button" onClick={() => setShowFilters(false)}>Close</button>
+              <button className="btn btn-secondary" type="button" onClick={() => { setFilterQuery(''); setFilterInstitution('All Banks'); setFilterType('All Types'); setFilterStatus('All Status') }}>Clear</button>
+              <button className="btn btn-primary" type="button" onClick={() => setShowFilters(false)}>Done</button>
+            </div>
+          </div>
+        )}
+
+        {showTransferModal && (
+          <div className="bank-modal-overlay">
+            <div className="card bank-modal-card">
+              <div className="card-title">Transfer funds</div>
+              <div className="bank-form-grid">
+                <label><span>From account</span><select value={transferSource} onChange={(event) => setTransferSource(event.target.value)}>{accounts.map((account) => <option key={account.id} value={account.name}>{account.name} · {formatCurrency(account.balance)}</option>)}</select></label>
+                <label><span>To account</span><select value={transferTarget} onChange={(event) => setTransferTarget(event.target.value)}>{accounts.filter((account) => account.name !== transferSource).map((account) => <option key={account.id} value={account.name}>{account.name}</option>)}</select></label>
+                <label><span>Amount</span><input type="number" min={0} value={transferAmount} onChange={(event) => setTransferAmount(Number(event.target.value))} /></label>
+              </div>
+              <div className="btn-group">
+                <button className="btn btn-primary" type="button" onClick={submitTransferFunds}>Confirm transfer</button>
+                <button className="btn btn-secondary" type="button" onClick={() => setShowTransferModal(false)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {showReconcileModal && (
+          <div className="bank-modal-overlay">
+            <div className="card reconcile-modal-card">
+              <div className="card-title">Reconcile bank accounts</div>
+              <div className="report-modal-body">
+                <p>Mark pending and processing transactions as completed. This does not change any balance.</p>
+                <div className="report-summary">
+                  <div><strong>Accounts</strong>: {accounts.length}</div>
+                  <div><strong>Pending transactions</strong>: {reconciliationDue}</div>
+                </div>
+              </div>
+              <div className="report-actions">
+                <button className="btn btn-primary" type="button" onClick={confirmReconcile}>Mark completed</button>
+                <button className="btn btn-secondary" type="button" onClick={() => setShowReconcileModal(false)}>Close</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {activeReportModal && (
+          <div className="bank-modal-overlay">
+            <div className="card report-modal-card">
+              <div className="card-title">{activeReportModal}</div>
+              <div className="report-modal-body">
+                <p>Download the {activeReportModal.toLowerCase()} from the accounts and transactions currently saved.</p>
+                <div className="report-summary">
+                  <div><strong>Accounts</strong>: {visibleAccounts.length}</div>
+                  <div><strong>Total balance</strong>: {formatCurrency(totalBanks)}</div>
+                </div>
+              </div>
+              <div className="report-actions">
+                <button className="btn btn-primary" type="button" onClick={confirmReportAction}>Download</button>
+                <button className="btn btn-secondary" type="button" onClick={() => setActiveReportModal(null)}>Cancel</button>
+              </div>
             </div>
           </div>
         )}
 
         <div className="bank-content-grid">
-          {showTransferModal && (
-            <div className="bank-modal-overlay">
-              <div className="card bank-modal-card">
-                <div className="card-title">Transfer Funds</div>
-                <div className="bank-form-grid">
-                  <label>
-                    <span>From Account</span>
-                    <select value={transferSource} onChange={(e) => setTransferSource(e.target.value)}>
-                      {bankAccounts.map((account) => (<option key={account.bank} value={account.bank}>{account.bank}</option>))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>To Account</span>
-                    <select value={transferTarget} onChange={(e) => setTransferTarget(e.target.value)}>
-                      {bankAccounts.filter((account) => account.bank !== transferSource).map((account) => (<option key={account.bank} value={account.bank}>{account.bank}</option>))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Amount</span>
-                    <input type="number" min={1000} value={transferAmount} onChange={(e) => setTransferAmount(Number(e.target.value))} />
-                  </label>
-                </div>
-                <div className="btn-group">
-                  <button className="btn btn-primary" type="button" onClick={submitTransferFunds}>Confirm Transfer</button>
-                  <button className="btn btn-secondary" type="button" onClick={() => setShowTransferModal(false)}>Cancel</button>
-                </div>
-              </div>
-            </div>
-          )}
-          {showReconcileModal && (
-            <div className="bank-modal-overlay">
-              <div className="card reconcile-modal-card">
-                <div className="card-title">Reconcile Bank Accounts</div>
-                <div className="report-modal-body">
-                  <p>Reconcile your bank balances with the latest posted transactions.</p>
-                  <div className="report-summary">
-                    <div><strong>Accounts to reconcile</strong>: {bankAccounts.length}</div>
-                    <div><strong>Pending transactions</strong>: {reconciliationDue}</div>
-                  </div>
-                </div>
-                <div className="report-actions">
-                  <button className="btn btn-primary" type="button" onClick={confirmReconcile}>Reconcile Now</button>
-                  <button className="btn btn-secondary" type="button" onClick={() => setShowReconcileModal(false)}>Close</button>
-                </div>
-              </div>
-            </div>
-          )}
-          {activeReportModal && (
-            <div className="bank-modal-overlay">
-              <div className="card report-modal-card">
-                <div className="card-title">{activeReportModal}</div>
-                <div className="report-modal-body">
-                  <p>Confirm generation of the <strong>{activeReportModal}</strong> report for company bank accounts.</p>
-                  <div className="report-summary">
-                    <div><strong>Accounts included</strong>: {bankAccounts.length}</div>
-                    <div><strong>Total balance</strong>: {formatCurrency(totalBanks)}</div>
-                    <div><strong>Generated at</strong>: {new Date().toLocaleString()}</div>
-                  </div>
-                </div>
-                <div className="report-actions">
-                  <button className="btn btn-primary" type="button" onClick={confirmReportAction}>Generate</button>
-                  <button className="btn btn-secondary" type="button" onClick={() => setActiveReportModal(null)}>Cancel</button>
-                </div>
-              </div>
-            </div>
-          )}
           <div className="card">
             <div className="card-hd">
               <div>
-                <div className="card-title">Bank Accounts</div>
-                <div className="card-subtitle">View available, book, and cleared balances for every account.</div>
+                <div className="card-title">Bank accounts</div>
+                <div className="card-subtitle">{visibleAccounts.length} of {accounts.length} accounts</div>
               </div>
             </div>
             <div className="tbl-wrap">
@@ -423,32 +343,31 @@ export default function BanksPage() {
                 <thead>
                   <tr>
                     <th>Bank</th>
-                    <th>Account Name</th>
-                    <th>Account Type</th>
+                    <th>Account</th>
+                    <th>Number</th>
+                    <th>Type</th>
                     <th>Currency</th>
+                    <th className="td-r">Opening</th>
                     <th className="td-r">Available</th>
-                    <th className="td-r">Book Balance</th>
-                    <th className="td-r">Cleared</th>
                     <th>Status</th>
-                    <th>Actions</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {bankAccounts.map(({ bank, balance }) => (
-                    <tr key={bank}>
-                      <td>{bank}</td>
-                      <td>{`${bank} Account`}</td>
-                      <td>{bank === 'UBA' ? 'Savings' : 'Current'}</td>
-                      <td>₦</td>
-                      <td className="td-r">{formatCurrency(balance)}</td>
-                      <td className="td-r">{formatCurrency(balance)}</td>
-                      <td className="td-r">{formatCurrency(balance)}</td>
-                      <td><span className="status-pill success">Active</span></td>
-                      <td>
-                        <button className="btn btn-sm" title={`View details for ${bank}`} onClick={() => handleViewBank(bank)}>View</button>
-                      </td>
+                  {visibleAccounts.map((account) => (
+                    <tr key={account.id}>
+                      <td>{account.institution}</td>
+                      <td>{account.name}</td>
+                      <td>{maskAccountNumber(account.accountNumber)}</td>
+                      <td>{account.accountType}</td>
+                      <td>{account.currency}</td>
+                      <td className="td-r">{formatCurrency(account.openingBalance)}</td>
+                      <td className="td-r">{formatCurrency(account.balance)}</td>
+                      <td><span className={`status-pill ${account.status.toLowerCase() === 'active' ? 'success' : ''}`}>{account.status}</span></td>
+                      <td><button className="btn btn-sm" type="button" onClick={() => setSelectedBankId(account.id)}>View</button></td>
                     </tr>
                   ))}
+                  {visibleAccounts.length === 0 && <tr><td colSpan={9}>No bank accounts match these filters.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -456,36 +375,41 @@ export default function BanksPage() {
 
           <div className="bank-detail-stack">
             <div className="card">
-              <div className="card-title">Account Information</div>
+              <div className="card-title">Account information</div>
               <div className="bank-detail-panel">
-                <div className="bank-detail-row"><span>Bank Name</span><strong>{selectedAccount?.bank ?? 'No account selected'}</strong></div>
-                <div className="bank-detail-row"><span>Account Name</span><strong>{selectedAccount ? `${selectedAccount.bank} Operations` : 'N/A'}</strong></div>
-                <div className="bank-detail-row"><span>Account Number</span><strong>{selectedAccount ? `BK${selectedAccount.bank.slice(0, 3).toUpperCase()}${selectedAccount.balance.toString().slice(-4)}` : '0000'}</strong></div>
-                <div className="bank-detail-row"><span>Branch</span><strong>{selectedAccount ? 'Main Branch' : 'N/A'}</strong></div>
-                <div className="bank-detail-row"><span>Currency</span><strong>₦</strong></div>
-                <div className="bank-detail-row"><span>Opening Balance</span><strong>{formatCurrency(selectedAccount ? selectedAccount.balance : 0)}</strong></div>
-                <div className="bank-detail-row"><span>Current Balance</span><strong>{formatCurrency(selectedAccount ? selectedAccount.balance : 0)}</strong></div>
-                <div className="bank-detail-row"><span>Available Balance</span><strong>{formatCurrency(selectedAccount ? selectedAccount.balance : 0)}</strong></div>
+                <div className="bank-detail-row"><span>Bank</span><strong>{selectedAccount?.institution ?? 'No account selected'}</strong></div>
+                <div className="bank-detail-row"><span>Account name</span><strong>{selectedAccount?.name ?? '—'}</strong></div>
+                <div className="bank-detail-row"><span>Account number</span><strong>{selectedAccount ? maskAccountNumber(selectedAccount.accountNumber) : '—'}</strong></div>
+                <div className="bank-detail-row"><span>Branch</span><strong>{selectedAccount?.branch || '—'}</strong></div>
+                <div className="bank-detail-row"><span>Currency</span><strong>{selectedAccount?.currency || '—'}</strong></div>
+                <div className="bank-detail-row"><span>Opening balance</span><strong>{formatCurrency(selectedAccount?.openingBalance || 0)}</strong></div>
+                <div className="bank-detail-row"><span>Available balance</span><strong>{formatCurrency(selectedAccount?.balance || 0)}</strong></div>
               </div>
             </div>
             <div className="card">
-              <div className="card-title">Reconciliation Status</div>
+              <div className="card-title">Cash movement</div>
               <div className="bank-detail-panel">
-                <div className="bank-detail-row"><span>Last Reconciled</span><strong>{state.bankTxns.length > 0 ? 'Recorded transactions' : 'Not reconciled'}</strong></div>
-                <div className="bank-detail-row"><span>Difference</span><strong>{formatCurrency(0)}</strong></div>
-                <div className="bank-detail-row"><span>Status</span><strong>Balanced</strong></div>
+                <div className="bank-detail-row"><span>Money in</span><strong>{formatCurrency(moneyIn)}</strong></div>
+                <div className="bank-share"><span style={{ width: `${(moneyIn / flowTotal) * 100}%` }} /></div>
+                <div className="bank-detail-row"><span>Money out</span><strong>{formatCurrency(moneyOut)}</strong></div>
+                <div className="bank-share out"><span style={{ width: `${(moneyOut / flowTotal) * 100}%` }} /></div>
+                <div className="bank-detail-row"><span>Net cash</span><strong>{formatCurrency(moneyIn - moneyOut)}</strong></div>
               </div>
             </div>
             <div className="card">
-              <div className="card-title">Cash Flow Summary</div>
+              <div className="card-title">Balance share</div>
               <div className="bank-detail-panel">
-                <div className="bank-detail-row"><span>Money In</span><strong>{formatCurrency(moneyIn)}</strong></div>
-                <div className="bank-detail-row"><span>Money Out</span><strong>{formatCurrency(moneyOut)}</strong></div>
-                <div className="bank-detail-row"><span>Net Cash Flow</span><strong>{formatCurrency(moneyIn - moneyOut)}</strong></div>
+                {accounts.length === 0 && <div className="metric-note">No accounts yet.</div>}
+                {accounts.map((account) => (
+                  <div key={account.id}>
+                    <div className="bank-detail-row"><span>{account.institution}</span><strong>{formatCurrency(account.balance)}</strong></div>
+                    <div className="bank-share"><span style={{ width: `${totalBanks > 0 ? (account.balance / totalBanks) * 100 : 0}%` }} /></div>
+                  </div>
+                ))}
               </div>
             </div>
             <div className="card">
-              <div className="card-title">Linked Modules</div>
+              <div className="card-title">Linked records</div>
               <div className="bank-detail-panel">
                 <div className="bank-detail-row"><span>Sales</span><strong>{formatCurrency(salesTotal)}</strong></div>
                 <div className="bank-detail-row"><span>Receivables</span><strong>{formatCurrency(receivablesTotal)}</strong></div>
@@ -496,27 +420,10 @@ export default function BanksPage() {
           </div>
         </div>
 
-        <div className="analytics-grid">
-          <div className="chart-card">
-            <div className="chart-card-title">Cash Flow</div>
-            <div className="chart-placeholder">Line chart showing Money In vs Money Out</div>
-          </div>
-          <div className="chart-card">
-            <div className="chart-card-title">Bank Balance Trend</div>
-            <div className="chart-placeholder">Monthly balance trend</div>
-          </div>
-          <div className="chart-card">
-            <div className="chart-card-title">Distribution</div>
-            <div className="chart-placeholder">Pie chart showing account share</div>
-          </div>
-        </div>
-
         <div className="reports-row">
-          <button className="btn btn-secondary" onClick={() => handleBankAction('Bank Statement')} title="Generate bank statement">Bank Statement</button>
-          <button className="btn btn-secondary" onClick={() => handleBankAction('Cash Flow Report')} title="Generate cash flow report">Cash Flow Report</button>
-          <button className="btn btn-secondary" onClick={() => handleBankAction('Reconciliation Report')} title="Generate reconciliation report">Reconciliation Report</button>
-          <button className="btn btn-secondary" onClick={() => handleBankAction('Bank Summary')} title="Generate bank summary">Bank Summary</button>
-          <button className="btn btn-secondary" onClick={() => handleBankAction('Transfer History')} title="Generate transfer history">Transfer History</button>
+          {['Bank Statement', 'Cash Flow Report', 'Reconciliation Report', 'Bank Summary', 'Transfer History'].map((report) => (
+            <button key={report} className="btn btn-secondary" type="button" onClick={() => setActiveReportModal(report)}>{report}</button>
+          ))}
         </div>
       </div>
     </AppLayout>

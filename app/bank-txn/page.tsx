@@ -5,13 +5,14 @@ import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { formatCurrency, triggerAppToast, getCurrentDate } from '@/lib/utils'
 import { downloadPdf, downloadExcel } from '@/lib/export-utils'
+import { applyBankMovements, displayBankAccounts, parseBankStatement, runningBalanceById } from '@/lib/bank-ledger'
 import { ArrowDown, Repeat, Download, Upload, Filter, PlusCircle, CheckCircle2 } from 'lucide-react'
 
 const transactionTypes = ['Deposit', 'Withdrawal', 'Transfer', 'Bank Charges', 'Interest', 'Salary', 'Loan', 'Refund', 'Adjustment']
 const perPageOptions = [25, 50, 100]
 
 export default function BankTxnPage() {
-  const { state, updateState, addAuditLog } = useAccounting()
+  const { state, updateState, addAuditLog, user } = useAccounting()
   const companyName = state.companySettings.companyName || 'Company'
   const [search, setSearch] = useState('')
   const [filterBank, setFilterBank] = useState('All Banks')
@@ -33,18 +34,21 @@ export default function BankTxnPage() {
   const [txnMethod, setTxnMethod] = useState('Bank Transfer')
   const [txnDescription, setTxnDescription] = useState('')
   const [txnDate, setTxnDate] = useState(getCurrentDate())
-  const bankList = Object.keys(state.banks)
+  const [statementText, setStatementText] = useState('')
+  const [statementBank, setStatementBank] = useState('')
+  const [statementError, setStatementError] = useState('')
+  const accounts = useMemo(() => displayBankAccounts(state.banks, state.bankAccounts), [state.banks, state.bankAccounts])
+  const bankList = accounts.map((account) => account.name)
   const bankOptions = bankList
 
   const transactions = useMemo(() => {
-    let runningBalance = 0
-    return state.bankTxns.map((txn, index) => {
-      const amount = txn.amount
-      runningBalance += amount
+    const openingByBank = Object.fromEntries(accounts.map((account) => [account.name, Number(account.openingBalance || 0)]))
+    const balances = runningBalanceById(state.bankTxns, openingByBank)
+    return state.bankTxns.map((txn) => {
+      const amount = Number(txn.amount || 0)
+      const bank = txn.bank || ''
+      const account = accounts.find((item) => item.name === bank)
       const type = txn.type || (amount > 0 ? 'Deposit' : 'Withdrawal')
-      const bank = txn.bank || bankOptions[index % Math.max(bankOptions.length, 1)]
-      const status = txn.status || 'Completed'
-
       return {
         ...txn,
         reference: txn.id,
@@ -52,20 +56,24 @@ export default function BankTxnPage() {
         type,
         debit: amount < 0 ? Math.abs(amount) : 0,
         credit: amount > 0 ? amount : 0,
-        balance: runningBalance,
-        status,
-        payer: amount > 0 ? 'Customer' : 'Company',
-        payee: amount < 0 ? txn.name : 'Bank Account',
-        recordedBy: 'Finance Team',
-        approvedBy: 'MD',
-        branch: 'Lagos',
+        balance: balances[txn.id] ?? Number(account?.balance || 0),
+        status: txn.status || 'Completed',
+        payer: txn.payer || (amount > 0 ? txn.name || 'Receipt' : companyName),
+        payee: txn.payee || (amount < 0 ? txn.name || 'Payment' : account?.name || 'Bank account'),
+        recordedBy: txn.recordedBy || '—',
+        approvedBy: txn.approvedBy || '—',
+        branch: txn.branch || account?.branch || '—',
       }
     })
-  }, [state.bankTxns, bankOptions])
+  }, [accounts, companyName, state.bankTxns])
+
+  const branchOptions = [...new Set(transactions.map((txn) => txn.branch).filter((branch) => branch && branch !== '—'))]
+  const userOptions = [...new Set(transactions.map((txn) => txn.recordedBy).filter((name) => name && name !== '—'))]
+  const today = getCurrentDate()
 
   const summary = useMemo(() => {
-    const deposits = transactions.filter((txn) => txn.credit > 0).reduce((sum, txn) => sum + txn.credit, 0)
-    const withdrawals = transactions.filter((txn) => txn.debit > 0).reduce((sum, txn) => sum + txn.debit, 0)
+    const deposits = transactions.filter((txn) => txn.credit > 0 && txn.date === today).reduce((sum, txn) => sum + txn.credit, 0)
+    const withdrawals = transactions.filter((txn) => txn.debit > 0 && txn.date === today).reduce((sum, txn) => sum + txn.debit, 0)
     const transfers = transactions.filter((txn) => txn.type === 'Transfer').length
     const pendingTransactions = transactions.filter((txn) => txn.status.toLowerCase().includes('processing') || txn.status.toLowerCase().includes('pending')).length
     const failedTransfers = transactions.filter((txn) => txn.status.toLowerCase().includes('rejected') || txn.status.toLowerCase().includes('failed')).length
@@ -79,7 +87,7 @@ export default function BankTxnPage() {
       reconciledRate: Math.min(100, reconciledRate),
       failedTransfers,
     }
-  }, [transactions])
+  }, [today, transactions])
 
   const filteredTransactions = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -107,6 +115,9 @@ export default function BankTxnPage() {
       triggerAppToast('Create Bank Account', 'You must create a bank account before importing statements.')
       return
     }
+    setStatementBank(bankList[0] || '')
+    setStatementText('')
+    setStatementError('')
     setActiveTxnModal(action)
   }
 
@@ -137,57 +148,39 @@ export default function BankTxnPage() {
     if (!activeTxnModal) return
 
     if (activeTxnModal === 'Import Statement') {
-      const importedTxns = [
-        {
-          id: `TXN-IMP-${Date.now()}`,
-          date: getCurrentDate(),
-          name: 'Imported Deposit',
-          activity: 'Statement import credit',
-          method: 'Bank Transfer',
-          amount: 380000,
-          status: 'Completed',
-          description: 'Imported bank statement deposit',
-          attachments: 0,
-          type: 'Deposit',
-          bank: bankList[0],
-        },
-        {
-          id: `TXN-IMP-${Date.now() + 1}`,
-          date: getCurrentDate(),
-          name: 'Imported Charges',
-          activity: 'Bank service charge',
-          method: 'Bank Charge',
-          amount: -52000,
-          status: 'Completed',
-          description: 'Imported bank charges from statement',
-          attachments: 0,
-          type: 'Bank Charges',
-          bank: bankList[0],
-        },
-      ]
-
-      const updatedBanks = { ...state.banks }
-      importedTxns.forEach((txn) => {
-        updatedBanks[txn.bank] = Math.max(0, (updatedBanks[txn.bank] ?? 0) + txn.amount)
-      })
-
-      updateState({ bankTxns: [...importedTxns, ...state.bankTxns], banks: updatedBanks })
-      addAuditLog('IMPORT', 'BANK', `IMP-${Date.now()}`, 'Bank statement imported and applied to ledger.')
-      triggerAppToast('Import Statement', 'Bank statement imported successfully.')
+      const rows = parseBankStatement(statementText)
+      if (!statementBank || rows.length === 0) {
+        setStatementError('Choose an account and a CSV with date, description, and amount columns.')
+        return
+      }
+      const importedTxns = rows.map((row, index) => ({
+        id: `TXN-IMP-${Date.now()}-${index}`,
+        date: row.date,
+        name: row.description,
+        activity: row.description,
+        method: 'Bank statement',
+        amount: row.amount,
+        status: 'Completed',
+        description: row.description,
+        attachments: 0,
+        type: row.amount >= 0 ? 'Deposit' : 'Withdrawal',
+        bank: statementBank,
+        recordedBy: user?.name || '—',
+      }))
+      const moved = applyBankMovements(state, importedTxns.map((txn) => ({ name: statementBank, delta: txn.amount })))
+      updateState({ ...moved, bankTxns: [...importedTxns, ...state.bankTxns] })
+      addAuditLog('IMPORT', 'BANK', `IMP-${Date.now()}`, `Imported ${importedTxns.length} statement lines into ${statementBank}.`)
+      triggerAppToast('Import Statement', `${importedTxns.length} statement lines were added to ${statementBank}.`)
     }
 
     if (activeTxnModal === 'Reconcile') {
-      const updatedBanks = { ...state.banks }
-      Object.keys(updatedBanks).forEach((bank) => {
-        updatedBanks[bank] = Math.max(0, updatedBanks[bank] + 25000)
-      })
       const reconciledTxns = state.bankTxns.map((txn) => ({
         ...txn,
-        status: txn.status === 'Processing' ? 'Completed' : txn.status,
+        status: txn.status === 'Processing' || txn.status === 'Pending' ? 'Completed' : txn.status,
       }))
-      updateState({ banks: updatedBanks, bankTxns: reconciledTxns })
-      addAuditLog('RECONCILE', 'BANK', 'RECON-001', 'Bank reconciliation completed and balances adjusted.')
-      triggerAppToast('Reconcile', 'Bank reconciliation completed successfully.')
+      updateState({ bankTxns: reconciledTxns })
+      addAuditLog('RECONCILE', 'BANK', 'RECON-001', 'Pending bank transactions were marked completed without changing balances.')
+      triggerAppToast('Reconcile', 'Pending transactions were marked completed. Balances were not changed.')
     }
 
     closeTxnModal()
@@ -242,6 +235,11 @@ export default function BankTxnPage() {
       alert('Please select a different target bank for transfers.')
       return
     }
+    const sourceBalance = accounts.find((account) => account.name === txnBank)?.balance ?? 0
+    if ((txnMode === 'Withdrawal' || txnMode === 'Transfer') && txnAmount > sourceBalance) {
+      alert('That amount is higher than the available balance.')
+      return
+    }
     const amount = txnMode === 'Withdrawal' ? -txnAmount : txnMode === 'Deposit' ? txnAmount : -txnAmount
     const txn = {
       id: `TXN-${Date.now()}`,
@@ -255,18 +253,13 @@ export default function BankTxnPage() {
       attachments: 0,
       type: txnMode,
       bank: txnBank,
+      recordedBy: user?.name || '—',
+      branch: accounts.find((account) => account.name === txnBank)?.branch || '',
     }
-    const updatedBanks = { ...state.banks }
+    const movements = [{ name: txnBank, delta: amount }]
     const txnsToAdd = [txn]
-    if (txnMode === 'Deposit') {
-      updatedBanks[txnBank] = (updatedBanks[txnBank] ?? 0) + txnAmount
-    }
-    if (txnMode === 'Withdrawal') {
-      updatedBanks[txnBank] = Math.max(0, (updatedBanks[txnBank] ?? 0) - txnAmount)
-    }
     if (txnMode === 'Transfer') {
-      updatedBanks[txnBank] = Math.max(0, (updatedBanks[txnBank] ?? 0) - txnAmount)
-      updatedBanks[txnTargetBank] = (updatedBanks[txnTargetBank] ?? 0) + txnAmount
+      movements.push({ name: txnTargetBank, delta: txnAmount })
       const targetTxn = {
         id: `TXN-${Date.now()}-R`,
         date: txnDate,
@@ -279,10 +272,12 @@ export default function BankTxnPage() {
         attachments: 0,
         type: 'Deposit',
         bank: txnTargetBank,
+        recordedBy: user?.name || '—',
+        branch: accounts.find((account) => account.name === txnTargetBank)?.branch || '',
       }
       txnsToAdd.push(targetTxn)
     }
-    updateState({ bankTxns: [...txnsToAdd, ...state.bankTxns], banks: updatedBanks })
+    updateState({ ...applyBankMovements(state, movements), bankTxns: [...txnsToAdd, ...state.bankTxns] })
     addAuditLog('BANK_TXN', 'BANK', txn.id, `${txnMode} of ${formatCurrency(txnAmount)} recorded.`)
     triggerAppToast(`${txnMode} completed`, `${formatCurrency(txnAmount)} ${txnMode.toLowerCase()} recorded for ${txnBank}.`)
     setShowTxnForm(false)
@@ -294,7 +289,7 @@ export default function BankTxnPage() {
         <div className="txn-header">
           <div>
             <div className="pg-title">Bank Transactions</div>
-            <div className="pg-subtitle">View, reconcile, approve, and manage all financial transactions across bank accounts.</div>
+            <div className="pg-subtitle">Deposits, withdrawals, and transfers recorded against {companyName} accounts.</div>
           </div>
           <div className="txn-actions">
             <button
@@ -382,16 +377,14 @@ export default function BankTxnPage() {
                 <span>Branch</span>
                 <select value={filterBranch} onChange={(e) => setFilterBranch(e.target.value)}>
                   <option>All Branches</option>
-                  <option>Lagos</option>
-                  <option>Abuja</option>
+                  {branchOptions.map((branch) => <option key={branch}>{branch}</option>)}
                 </select>
               </label>
               <label>
-                <span>User</span>
+                <span>Recorded by</span>
                 <select value={filterUser} onChange={(e) => setFilterUser(e.target.value)}>
                   <option>All Users</option>
-                  <option>Finance Team</option>
-                  <option>Admin</option>
+                  {userOptions.map((name) => <option key={name}>{name}</option>)}
                 </select>
               </label>
             </div>
@@ -485,16 +478,30 @@ export default function BankTxnPage() {
               <div className="txn-form-grid">
                 {activeTxnModal === 'Import Statement' && (
                   <div className="txn-detail-panel">
-                    <div className="bank-detail-row"><span>Statement Date</span><strong>{getCurrentDate()}</strong></div>
-                    <div className="bank-detail-row"><span>Target Bank</span><strong>{bankList[0] ?? 'No bank selected'}</strong></div>
-                    <div className="bank-detail-row"><span>Imported Items</span><strong>2 transactions</strong></div>
+                    <label>
+                      <span>Account</span>
+                      <select value={statementBank} onChange={(event) => setStatementBank(event.target.value)}>
+                        {bankOptions.map((bank) => <option key={bank}>{bank}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Statement CSV</span>
+                      <input type="file" accept=".csv,text/csv" onChange={async (event) => {
+                        const file = event.target.files?.[0]
+                        setStatementError('')
+                        setStatementText(file ? await file.text() : '')
+                      }} />
+                    </label>
+                    <p className="metric-note">Use columns for date, description, and amount. Debit and credit columns are also accepted. Only the rows in the file are posted.</p>
+                    {statementError && <div className="import-error">{statementError}</div>}
                   </div>
                 )}
                 {activeTxnModal === 'Reconcile' && (
                   <div className="txn-detail-panel">
-                    <div className="bank-detail-row"><span>Pending Transactions</span><strong>{summary.pendingTransactions}</strong></div>
-                    <div className="bank-detail-row"><span>Failed Transfers</span><strong>{summary.failedTransfers}</strong></div>
-                    <div className="bank-detail-row"><span>Available Bank Accounts</span><strong>{bankList.length}</strong></div>
+                    <div className="bank-detail-row"><span>Pending transactions</span><strong>{summary.pendingTransactions}</strong></div>
+                    <div className="bank-detail-row"><span>Failed transfers</span><strong>{summary.failedTransfers}</strong></div>
+                    <div className="bank-detail-row"><span>Accounts</span><strong>{bankList.length}</strong></div>
+                    <p className="metric-note">This marks pending items completed. It does not add or remove money.</p>
                   </div>
                 )}
               </div>
@@ -599,44 +606,32 @@ export default function BankTxnPage() {
                 <div className="bank-detail-row"><span>Description</span><strong>{selectedTransaction?.activity || '-'}</strong></div>
                 <div className="bank-detail-row"><span>Payment Method</span><strong>{selectedTransaction?.method || '-'}</strong></div>
                 <div className="bank-detail-row"><span>Status</span><strong>{selectedTransaction?.status || '-'}</strong></div>
-                <div className="bank-detail-row"><span>Recorded By</span><strong>{selectedTransaction?.recordedBy}</strong></div>
-                <div className="bank-detail-row"><span>Approved By</span><strong>{selectedTransaction?.approvedBy}</strong></div>
+                <div className="bank-detail-row"><span>Recorded by</span><strong>{selectedTransaction?.recordedBy || '—'}</strong></div>
+                <div className="bank-detail-row"><span>Branch</span><strong>{selectedTransaction?.branch || '—'}</strong></div>
               </div>
             </div>
             <div className="card">
-              <div className="card-title">Related Records</div>
+              <div className="card-title">Related record</div>
               <div className="bank-detail-panel">
-                <div className="bank-detail-row"><span>Invoice</span><strong>INV-2044</strong></div>
-                <div className="bank-detail-row"><span>Purchase</span><strong>PO-1182</strong></div>
-                <div className="bank-detail-row"><span>Expense</span><strong>EXP-889</strong></div>
-                <div className="bank-detail-row"><span>Supplier</span><strong>Check</strong></div>
-                <div className="bank-detail-row"><span>Customer</span><strong>{selectedTransaction?.name || '-'}</strong></div>
-                <div className="bank-detail-row"><span>Journal Entry</span><strong>JE-2026</strong></div>
-              </div>
-            </div>
-            <div className="card">
-              <div className="card-title">Attachments</div>
-              <div className="txn-attachment-list">
-                <div className="txn-attachment-item">Bank Slip</div>
-                <div className="txn-attachment-item">Receipt</div>
-                <div className="txn-attachment-item">Transfer Confirmation</div>
-                <div className="txn-attachment-item">Cheque Image</div>
+                <div className="bank-detail-row"><span>Name</span><strong>{selectedTransaction?.name || '—'}</strong></div>
+                <div className="bank-detail-row"><span>Description</span><strong>{selectedTransaction?.description || selectedTransaction?.activity || '—'}</strong></div>
+                <div className="bank-detail-row"><span>Account</span><strong>{selectedTransaction?.bank || '—'}</strong></div>
+                <div className="bank-detail-row"><span>Attachments</span><strong>{selectedTransaction?.attachments ? selectedTransaction.attachments : 'None'}</strong></div>
               </div>
             </div>
             <div className="card reconciliation-card">
-              <div className="card-title">Reconciliation Panel</div>
+              <div className="card-title">Reconciliation</div>
               <div className="bank-detail-panel">
-                <div className="bank-detail-row"><span>Bank Statement</span><strong>{formatCurrency(selectedTransaction?.balance ?? 0)}</strong></div>
-                <div className="bank-detail-row"><span>Book Balance</span><strong>{formatCurrency(selectedTransaction?.balance ?? 0)}</strong></div>
-                <div className="bank-detail-row"><span>Bank Balance</span><strong>{formatCurrency(selectedTransaction?.balance ?? 0)}</strong></div>
-                <div className="bank-detail-row"><span>Difference</span><strong>{formatCurrency(0)}</strong></div>
-                <div className="bank-detail-row"><span>Status</span><strong>Matched</strong></div>
+                <div className="bank-detail-row"><span>Running balance</span><strong>{formatCurrency(selectedTransaction?.balance ?? 0)}</strong></div>
+                <div className="bank-detail-row"><span>Account balance</span><strong>{formatCurrency(accounts.find((account) => account.name === selectedTransaction?.bank)?.balance ?? 0)}</strong></div>
+                <div className="bank-detail-row"><span>Status</span><strong>{selectedTransaction?.status || '—'}</strong></div>
               </div>
               <div className="txn-recon-actions">
-                <button className="btn btn-secondary">Match</button>
-                <button className="btn btn-secondary">Ignore</button>
-                <button className="btn btn-secondary">Adjust</button>
-                <button className="btn btn-primary">Create Journal</button>
+                <button className="btn btn-primary" type="button" disabled={!selectedTransaction || selectedTransaction.status === 'Completed'} onClick={() => {
+                  if (!selectedTransaction) return
+                  updateState({ bankTxns: state.bankTxns.map((txn) => txn.id === selectedTransaction.id ? { ...txn, status: 'Completed' } : txn) })
+                  triggerAppToast('Reconcile', 'Transaction marked completed.')
+                }}>Mark matched</button>
               </div>
             </div>
           </div>

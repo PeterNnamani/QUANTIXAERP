@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useMemo, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import BulkImport from '@/components/bulk-import'
 import { useAccounting, type BankAccount, type CompanySettings, type UserSettings } from '@/lib/context'
 import { formatCurrency } from '@/lib/utils'
 import { canEditPermission, getDefaultRoles, saveRoles, type RoleDefinition, type PermissionKey } from '@/lib/rbac'
+import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipedCompanyBooks, wipeConfirmationPhrase } from '@/lib/company-lifecycle'
 import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
 import { dedupeChartOfAccounts, requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
 
@@ -17,10 +18,11 @@ const sidebarSections = [
   { id: 'security', label: 'Security', description: 'Auth, sessions, and policies' },
   { id: 'banks', label: 'Banks', description: 'Create and manage bank accounts' },
   { id: 'ai', label: 'AI Assistant', description: 'Automation and insights' },
+  { id: 'account', label: 'Account', description: 'Delete company data or close the account', superAdmin: true },
 ]
 
 export default function SettingsPage() {
-  const { state, updateState, addAuditLog, user } = useAccounting()
+  const { state, updateState, addAuditLog, user, logout } = useAccounting()
   const defaultUserSettings: UserSettings = {
     dateFormat: 'DD/MM/YYYY', timezone: 'Africa/Lagos',
     notifications: { email: true, push: true, whatsapp: true },
@@ -58,11 +60,25 @@ export default function SettingsPage() {
   const [newBankOpeningBalance, setNewBankOpeningBalance] = useState(0)
   const [newBankOpeningDate, setNewBankOpeningDate] = useState(new Date().toISOString().slice(0, 10))
   const [bankCreationStatus, setBankCreationStatus] = useState('')
+  const [settingsNotice, setSettingsNotice] = useState<{ tone: 'error' | 'success'; message: string } | null>(null)
+  const [wipeConfirm, setWipeConfirm] = useState('')
+  const [closeConfirm, setCloseConfirm] = useState('')
+  const [lifecycleStatus, setLifecycleStatus] = useState<{ tone: 'error' | 'success'; message: string } | null>(null)
+  const [lifecycleBusy, setLifecycleBusy] = useState(false)
   const canManageCompanySettings = canEditPermission(user, 'settings')
+  const isSuperAdmin = isSuperAdminRole(user?.role)
+  const visibleSections = sidebarSections.filter((section) => !section.superAdmin || isSuperAdmin)
+  const sectionChosen = useRef(false)
 
   useEffect(() => {
     setUserSettings({ ...defaultUserSettings, ...(user?.userSettings || {}), notifications: { ...defaultUserSettings.notifications, ...(user?.userSettings?.notifications || {}) } })
   }, [user?.userSettings])
+
+  useEffect(() => {
+    if (sectionChosen.current || !canManageCompanySettings) return
+    sectionChosen.current = true
+    setActiveSection('company')
+  }, [canManageCompanySettings])
 
   const selectedRole = useMemo(() => roles.find((role) => role.id === previewRoleId) || roles[0], [previewRoleId, roles])
 
@@ -77,7 +93,7 @@ export default function SettingsPage() {
   const handleSaveOpeningCapital = () => {
     const value = parseFloat(openingCapital as any) || 0
     updateState({ openingCapital: value, companySettings: { ...companySettings, openingCapital: value } })
-    alert('Opening capital saved!')
+    setSettingsNotice({ tone: 'success', message: 'Opening capital saved.' })
   }
 
   const financialPositionAccounts = useMemo(() => {
@@ -99,7 +115,7 @@ export default function SettingsPage() {
     })
     updateState({ chartOfAccounts: mergedChartOfAccounts })
     addAuditLog('UPDATE', 'ACCOUNTING', 'OPENING_BALANCES', 'Financial-position opening balances updated.')
-    alert('Opening balances saved!')
+    setSettingsNotice({ tone: 'success', message: 'Opening balances saved.' })
   }
 
   const openImportModal = () => {
@@ -305,7 +321,57 @@ export default function SettingsPage() {
     setRoles(nextRoles)
     updateState({ roles: nextRoles, companySettings: { ...companySettings, roles: nextRoles } })
     saveRoles(nextRoles)
-    alert(`Role ${roleName} created.`)
+    setSettingsNotice({ tone: 'success', message: `Role ${roleName} created.` })
+  }
+
+  const clearCompanyStorage = () => {
+    const companyId = user?.companyId
+    if (companyId) {
+      localStorage.removeItem(`hw_accounting_data:${companyId}`)
+      sessionStorage.removeItem(`hw_accounting_data:${companyId}`)
+    }
+    localStorage.removeItem('hw_accounting_data')
+    sessionStorage.removeItem('hw_accounting_data')
+  }
+
+  const runLifecycle = async (action: 'wipe' | 'close') => {
+    const phrase = action === 'close' ? CLOSE_ACCOUNT_PHRASE : wipeConfirmationPhrase(companySettings.companyName)
+    const typed = action === 'close' ? closeConfirm : wipeConfirm
+    if (typed.trim() !== phrase) {
+      setLifecycleStatus({ tone: 'error', message: action === 'close' ? 'Type CLOSE to confirm.' : `Type ${phrase} to confirm.` })
+      return
+    }
+    setLifecycleBusy(true)
+    setLifecycleStatus(null)
+    try {
+      let database = 'skipped'
+      if (user?.companyId) {
+        const response = await fetch('/api/company/lifecycle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, companyId: user.companyId, staffId: user.staffId, username: user.username }),
+        })
+        const result = await response.json()
+        if (!response.ok || !result.success) throw new Error(result.error || 'Unable to update the company.')
+        database = result.database || 'cleared'
+      }
+      if (action === 'close') {
+        clearCompanyStorage()
+        logout()
+        return
+      }
+      clearCompanyStorage()
+      updateState(wipedCompanyBooks(state))
+      setOpeningCapital(0)
+      setWipeConfirm('')
+      setCloseConfirm('')
+      const databaseNote = database === 'skipped' ? ' This browser was cleared. The database was not connected.' : ' The database was cleared as well.'
+      setLifecycleStatus({ tone: 'success', message: `Company data was removed. The company and staff sign-in remain.${databaseNote}` })
+    } catch (error) {
+      setLifecycleStatus({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to update the company.' })
+    } finally {
+      setLifecycleBusy(false)
+    }
   }
 
   const handleCreateBank = () => {
@@ -399,27 +465,19 @@ export default function SettingsPage() {
       <div className="page-shell">
         <div className="page-hero">
           <div>
-            <div className="eyebrow">System Control Center</div>
+            <div className="eyebrow">Workspace</div>
             <h1 className="page-title">Settings</h1>
-            <p className="page-subtitle">Fine-tune your company profile, operational defaults, security posture, and automation in one place.</p>
+            <p className="page-subtitle">{companySettings.companyName || 'Your company'} · {companySettings.currency || 'NGN'} · {user?.name || 'Signed-in account'}</p>
           </div>
           <BulkImport label="Import data" tableColumns={['Sales', 'Purchases', 'Inventory', 'Staff', 'Contacts']} />
         </div>
 
-        <div className="ai-insight">
-          <div>
-            <span className="ai-badge">AURA AI Insight</span>
-            <h3>Your fiscal year closes in 14 days. Review tax, reporting, and approval settings ahead of the closing window.</h3>
-          </div>
-          <div className="ai-pill">Planning Alert</div>
-        </div>
-
         <div className={`settings-layout ${canManageCompanySettings ? '' : 'settings-layout-personal'}`}>
           {canManageCompanySettings && <aside className="settings-sidebar">
-            {sidebarSections.map((section) => (
+            {visibleSections.map((section) => (
               <button
                 key={section.id}
-                className={`sidebar-item ${activeSection === section.id ? 'active' : ''}`}
+                className={`sidebar-item ${section.id === 'account' ? 'account' : ''} ${activeSection === section.id ? 'active' : ''}`}
                 onClick={() => setActiveSection(section.id)}
               >
                 <span className="sidebar-title">{section.label}</span>
@@ -462,6 +520,7 @@ export default function SettingsPage() {
                     <div className="metric-note">Current: {formatCurrency(state.openingCapital)}</div>
                   </div>
                 </div>
+                {settingsNotice && activeSection === 'business' && <div className={`staff-inline-notice ${settingsNotice.tone}`}>{settingsNotice.message}</div>}
               </div>
             )}
 
@@ -474,6 +533,7 @@ export default function SettingsPage() {
                   </div>
                   <button className="action-btn primary" type="button" onClick={handleSaveOpeningBalances}>Save opening balances</button>
                 </div>
+                {settingsNotice && <div className={`staff-inline-notice ${settingsNotice.tone}`}>{settingsNotice.message}</div>}
                 <div className="bank-account-register">
                   <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening balance</span><span>Balance date</span></div>
                   {financialPositionAccounts.map((account) => (
@@ -560,6 +620,38 @@ export default function SettingsPage() {
                   {state.bankAccounts.map((account) => <div className="bank-register-row" key={account.id}><span><strong>{account.name}</strong><small>{account.accountNumber || 'No account number'}</small></span><span>{account.accountType}</span><span>{formatCurrency(account.openingBalance)}</span><span>{account.status}</span></div>)}
                   {state.bankAccounts.length === 0 && <div className="metric-note bank-empty-state">No bank accounts have been created yet.</div>}
                 </div>
+              </div>
+            )}
+
+            {activeSection === 'account' && isSuperAdmin && (
+              <div className="settings-account">
+                <div className="panel-card">
+                  <div className="panel-title">Company controls</div>
+                  <p className="panel-subtitle">These actions are limited to the Super Admin. Staff with other roles cannot see or run them.</p>
+                </div>
+                <div className="settings-danger-card">
+                  <div>
+                    <div className="panel-title">Delete company data</div>
+                    <p>Removes sales, expenses, stock, banks, journals, customers, suppliers, and balances from this workspace and the database. The company, its name, and staff sign-in stay.</p>
+                  </div>
+                  <label className="fg">
+                    <span>Type {wipeConfirmationPhrase(companySettings.companyName)} to confirm</span>
+                    <input value={wipeConfirm} onChange={(event) => setWipeConfirm(event.target.value)} autoComplete="off" />
+                  </label>
+                  <button className="action-btn danger" type="button" disabled={lifecycleBusy || wipeConfirm.trim() !== wipeConfirmationPhrase(companySettings.companyName)} onClick={() => void runLifecycle('wipe')}>{lifecycleBusy ? 'Working…' : 'Delete company data'}</button>
+                </div>
+                <div className="settings-danger-card severe">
+                  <div>
+                    <div className="panel-title">Close account</div>
+                    <p>Deletes the company and every record, including staff, from this workspace and the database. You will be signed out.</p>
+                  </div>
+                  <label className="fg">
+                    <span>Type {CLOSE_ACCOUNT_PHRASE} to confirm</span>
+                    <input value={closeConfirm} onChange={(event) => setCloseConfirm(event.target.value)} autoComplete="off" />
+                  </label>
+                  <button className="action-btn danger" type="button" disabled={lifecycleBusy || closeConfirm.trim() !== CLOSE_ACCOUNT_PHRASE} onClick={() => void runLifecycle('close')}>{lifecycleBusy ? 'Working…' : 'Close account'}</button>
+                </div>
+                {lifecycleStatus && <div className={`staff-inline-notice ${lifecycleStatus.tone}`}>{lifecycleStatus.message}</div>}
               </div>
             )}
 
