@@ -43,8 +43,12 @@ export async function findUserInDatabase(
         .from('users')
         .select('*')
         .eq('pin', normalizedPin)
+        .abortSignal(AbortSignal.timeout(12000))
 
     if (error) {
+        if (error.name === 'AbortError' || /aborted|timeout/i.test(String(error.message || ''))) {
+            throw Object.assign(new Error('Sign-in is taking too long. Check the connection and try again.'), { name: 'TimeoutError' })
+        }
         console.warn('Unable to query users table for login', error)
         return null
     }
