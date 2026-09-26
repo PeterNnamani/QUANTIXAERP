@@ -4,7 +4,7 @@ import { ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { Mic, Send } from 'lucide-react'
 import { useAccounting } from '@/lib/context'
 import { usePathname, useRouter } from 'next/navigation'
-import { formatCurrencyOrZero } from '@/lib/utils'
+import { answerCompanyQuestion, companyBrief, type AssistantBooks } from '@/lib/assistant'
 import { canAccessRoute, canEditPermission, getRoutePermission } from '@/lib/rbac'
 import { planCanAccessRoute } from '@/lib/licensing'
 import Navigation from './navigation'
@@ -63,60 +63,53 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const [orbHovered, setOrbHovered] = useState(false)
   const [voiceActive, setVoiceActive] = useState(false)
   const [queryText, setQueryText] = useState('')
-  const [assistantResponse, setAssistantResponse] = useState('Ask about cash, loans, or audit insights.')
+  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; text: string }>>([])
   const [voiceMessage, setVoiceMessage] = useState('')
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
+  const threadRef = useRef<HTMLDivElement | null>(null)
+  const suggestions = ['Profit today', 'Who owes us?', 'Low stock', 'How do I record a sale?']
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
-  const analytics = useMemo(() => {
-    const total = (items: any[], getValue: (item: any) => unknown) => items.reduce((sum, item) => {
-      const value = Number(getValue(item))
-      return sum + (Number.isFinite(value) ? value : 0)
-    }, 0)
-    const revenue = total(state.sales, (sale) => sale.totalAmount)
-    const expenses = total(state.expenses, (expense) => expense.amount)
-    const cash = total(state.bankAccounts, (account) => account.balance)
-    const debt = total(state.loans, (loan) => loan.balance)
-    const repayments = total(state.loanRepayments, (repayment) => repayment.amount)
-    const receivables = total(state.receivables, (item) => item.balance)
-    const payables = total(state.payables, (item) => item.outstanding_amount ?? item.outstandingAmount ?? item.balance)
-    const format = (value: number) => formatCurrencyOrZero(value)
-    return {
-      revenue: format(revenue), expenses: format(expenses), cash: format(cash), debt: format(debt),
-      repayments: format(repayments), receivables: format(receivables), payables: format(payables),
-      counts: { sales: state.sales.length, expenses: state.expenses.length, loans: state.loans.length },
-      latestAudit: state.auditLogs[0],
-    }
-  }, [state])
+  const books = useMemo<AssistantBooks>(() => ({
+    companyName: state.companySettings.companyName,
+    userName: user?.name,
+    plan: user?.subscriptionPlan,
+    subscriptionStatus: user?.subscriptionStatus,
+    pathname: pathname || undefined,
+    sales: state.sales,
+    expenses: state.expenses,
+    purchases: state.purchases,
+    inventory: state.inventory,
+    bankAccounts: state.bankAccounts,
+    banks: state.banks,
+    receivables: state.receivables,
+    payables: state.payables,
+    loans: state.loans,
+    loanRepayments: state.loanRepayments,
+    staffMembers: state.staffMembers,
+    customerList: state.customerList,
+    supplierList: state.supplierList,
+    auditLogs: state.auditLogs,
+    prepayments: state.prepayments,
+  }), [pathname, state, user?.name, user?.subscriptionPlan, user?.subscriptionStatus])
+  const brief = useMemo(() => companyBrief(books), [books])
 
-  const answerQuestion = (question: string) => {
-    const normalized = question.trim().toLowerCase()
-    if (!normalized) return
-    if (/(cash|bank|liquid)/.test(normalized)) {
-      setAssistantResponse(`Live cash balance across ${state.bankAccounts.length} bank account(s): ${analytics.cash}.`)
-    } else if (/(revenue|sales|income)/.test(normalized)) {
-      setAssistantResponse(`Recorded revenue is ${analytics.revenue} across ${analytics.counts.sales} sale(s).`)
-    } else if (/(expense|spend|cost)/.test(normalized)) {
-      setAssistantResponse(`Recorded expenses are ${analytics.expenses} across ${analytics.counts.expenses} expense(s).`)
-    } else if (/(loan|debt|repay)/.test(normalized)) {
-      setAssistantResponse(`Loan data shows ${analytics.debt} outstanding and ${analytics.repayments} in recorded repayments across ${analytics.counts.loans} loan(s).`)
-    } else if (/(receivable|customer owe|owed to us)/.test(normalized)) {
-      setAssistantResponse(`Open receivables currently total ${analytics.receivables}.`)
-    } else if (/(payable|supplier owe|we owe)/.test(normalized)) {
-      setAssistantResponse(`Open payables currently total ${analytics.payables}.`)
-    } else if (/(audit|activity|latest|recent)/.test(normalized)) {
-      setAssistantResponse(analytics.latestAudit
-        ? `Latest recorded activity: ${analytics.latestAudit.action} ${analytics.latestAudit.reference || ''} on ${new Date(analytics.latestAudit.timestamp).toLocaleDateString()}.`
-        : 'There are no audit events recorded for this company yet.')
-    } else {
-      setAssistantResponse('I can answer questions about cash, revenue, expenses, loans, receivables, payables, and audit activity using the current company records.')
-    }
+  const ask = (question: string) => {
+    const text = question.trim()
+    if (!text) return
+    setMessages((current) => [...current, { role: 'user', text }, { role: 'assistant', text: answerCompanyQuestion(books, text) }])
+    setQueryText('')
+    recognitionRef.current?.stop()
   }
 
   useEffect(() => {
     return () => recognitionRef.current?.stop()
   }, [])
+
+  useEffect(() => {
+    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight })
+  }, [messages])
 
   const toggleVoiceInput = () => {
     if (voiceActive) {
@@ -156,90 +149,6 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     recognitionRef.current = recognition
     recognition.start()
   }
-
-  const pageConfig = useMemo(() => {
-    if (pathname?.startsWith('/loans')) {
-      return {
-        copy: "I’m tracking company debt, repayment timing, interest, and cash impact for the Loans page.",
-        highlights: [
-          { label: 'Outstanding', value: formatCurrencyOrZero(0) },
-          { label: 'Next payment', value: formatCurrencyOrZero(0) },
-          { label: 'Health', value: '—' },
-        ],
-        prediction: `Upcoming ${formatCurrencyOrZero(0)} debt service is due in 30 days. Keep liquidity in view.`,
-        bullets: ['Monitor cash flow before early settlement', 'Review lender exposures', 'Watch covenant or refinance triggers'],
-        recommendation: 'Consider prioritizing GTBank and investor loan payments.',
-        memory: [
-          { date: 'Jul 29', text: 'Loan payment schedule updated.' },
-          { date: 'Jul 15', text: 'New GTBank facility approved.' },
-          { date: 'Jun 20', text: 'Debt ratio fell below 34%.' },
-        ],
-        inputHint: 'loan payment, lender risk, debt ratio',
-        voiceHint: 'Ask QUANTIXA about loans, repayment, or cash impact.',
-      }
-    }
-
-    if (pathname?.startsWith('/prepayments')) {
-      return {
-        copy: 'I’m surfacing prepaid expense recognition, delivery timing, and unused advance balances.',
-        highlights: [
-          { label: 'Prepaid cash', value: formatCurrencyOrZero(0) },
-          { label: 'Remaining', value: formatCurrencyOrZero(0) },
-          { label: 'Schedules', value: '0 active' },
-        ],
-        prediction: 'A large prepaid insurance renewal is nearing recognition in 45 days.',
-        bullets: ['Track expiring prepayments', 'Confirm supplier deliveries', 'Adjust recognition schedules'],
-        recommendation: 'Audit unused advances before month-end.',
-        memory: [
-          { date: 'Jul 05', text: 'Insurance prepayment posted.' },
-          { date: 'Jun 22', text: 'Recognition schedule created for rent.' },
-          { date: 'May 10', text: 'Supplier advance under review.' },
-        ],
-        inputHint: 'prepayment, schedule, recognition',
-        voiceHint: 'Ask QUANTIXA about prepaid expenses or schedules.',
-      }
-    }
-
-    if (pathname?.startsWith('/supplier-rebates')) {
-      return {
-        copy: 'I’m highlighting rebate programs, pending settlements, and supplier return performance.',
-        highlights: [
-          { label: 'Pending', value: formatCurrencyOrZero(0) },
-          { label: 'Estimated', value: formatCurrencyOrZero(0) },
-          { label: 'Claims', value: '0 open' },
-        ],
-        prediction: 'Several supplier claims are due for settlement this quarter.',
-        bullets: ['Validate rebate contracts', 'Match invoices to claims', 'Anticipate cash receipts'],
-        recommendation: 'Escalate rebates with highest maturity.',
-        memory: [
-          { date: 'Jul 20', text: 'New supplier rebate program added.' },
-          { date: 'Jul 12', text: 'Rebate payment received from vendor.' },
-          { date: 'Jun 28', text: 'Rebate eligibility review completed.' },
-        ],
-        inputHint: 'supplier rebate, claim status, payable impact',
-        voiceHint: 'Ask QUANTIXA about rebate progress and cash recovery.',
-      }
-    }
-
-    return {
-      copy: 'I’m monitoring your business and surfacing the most relevant insights for the current page.',
-      highlights: [
-        { label: 'Cash', value: formatCurrencyOrZero(0) },
-        { label: 'Revenue', value: '—' },
-        { label: 'Expenses', value: '—' },
-      ],
-      prediction: 'Cash may tighten in 18 days if spend stays elevated.',
-      bullets: ['Watch supplier payouts', 'Review month-end accruals', 'Check bank liquidity'],
-      recommendation: 'Focus on cash flow and payables timing this week.',
-      memory: [
-        { date: 'Jul 29', text: 'Revenue spike detected.' },
-        { date: 'Jul 22', text: 'Marketing campaign increased sales.' },
-        { date: 'Jun 14', text: 'Inventory shortage happened.' },
-      ],
-      inputHint: 'cash, revenue, or expense health',
-      voiceHint: 'Ask QUANTIXA about company financial health.',
-    }
-  }, [pathname])
 
   useEffect(() => {
     if (!user) {
@@ -328,57 +237,43 @@ export default function AppLayout({ children }: { children: ReactNode }) {
                   ×
                 </button>
               </div>
-              <div className="quantixa-panel-copy">
-                Good evening {user?.name}. I&apos;m monitoring your business and ready to assist across every page.
-              </div>
-              <div className="quantixa-highlights">
-                <div className="quantixa-highlight-card">
-                  <span>Revenue</span>
-                  <strong>{analytics.revenue}</strong>
-                  <small>{analytics.counts.sales} recorded sale(s)</small>
-                </div>
-                <div className="quantixa-highlight-card">
-                  <span>Expenses</span>
-                  <strong>{analytics.expenses}</strong>
-                  <small>{analytics.counts.expenses} recorded expense(s)</small>
-                </div>
-                <div className="quantixa-highlight-card">
-                  <span>Cash</span>
-                  <strong>{analytics.cash}</strong>
-                  <small>{state.bankAccounts.length} bank account(s)</small>
+              <div className="quantixa-report">
+                <div className="quantixa-section-title">Company report</div>
+                <p>{brief.narrative}</p>
+                <div className="quantixa-highlights">
+                  <div className="quantixa-highlight-card"><span>Sales</span><strong>{brief.revenue}</strong></div>
+                  <div className="quantixa-highlight-card"><span>Costs</span><strong>{brief.expenses}</strong></div>
+                  <div className="quantixa-highlight-card"><span>Profit</span><strong>{brief.profit}</strong></div>
+                  <div className="quantixa-highlight-card"><span>Cash</span><strong>{brief.cash}</strong></div>
                 </div>
               </div>
-              <div className="quantixa-panel-grid">
-                <section>
-                  <div className="quantixa-section-title">Prediction</div>
-                  <p className="quantixa-prediction-copy">Current cash is {analytics.cash}; future cash movement is not forecast without dated commitments.</p>
-                  <div className="quantixa-bullet-list">
-                    <div className="quantixa-bullet-item">• Open payables: {analytics.payables}</div>
-                    <div className="quantixa-bullet-item">• Open receivables: {analytics.receivables}</div>
+              <div className="quantixa-memory-list">
+                {state.auditLogs.slice(0, 2).map((log) => (
+                  <div className="quantixa-memory-item" key={log.id || log.timestamp}>
+                    <span>{new Date(log.timestamp).toLocaleDateString('en-NG')}</span>
+                    <p>{formatBusinessMemory(log)}</p>
                   </div>
-                  <div className="quantixa-recommendation">Use these live balances when reviewing payment timing.</div>
-                </section>
-                <section>
-                  <div className="quantixa-section-title">Business Memory</div>
-                  <div className="quantixa-memory-list">
-                    {state.auditLogs.slice(0, 3).map((log) => (
-                      <div className="quantixa-memory-item" key={log.id}>
-                        <span>{new Date(log.timestamp).toLocaleDateString()}</span>
-                        <p>{formatBusinessMemory(log)}</p>
-                      </div>
-                    ))}
-                    {state.auditLogs.length === 0 && <p>No business activity has been recorded yet.</p>}
-                  </div>
-                </section>
+                ))}
               </div>
-              <div className="quantixa-command-card">
-                <div className="quantixa-command-label">QUANTIXA Input</div>
+              <div className="quantixa-thread" ref={threadRef} aria-live="polite">
+                {messages.length === 0 && <p className="quantixa-thread-empty">Ask anything about this company. Answers use the records already in the workspace.</p>}
+                {messages.map((message, index) => (
+                  <p key={`${message.role}-${index}`} className={`quantixa-message ${message.role}`}>{message.text}</p>
+                ))}
+              </div>
+              <div className="quantixa-suggestions">
+                {suggestions.map((suggestion) => (
+                  <button key={suggestion} type="button" className="quantixa-chip" onClick={() => ask(suggestion)}>{suggestion}</button>
+                ))}
+              </div>
+              <form className="quantixa-command-card" onSubmit={(event) => { event.preventDefault(); ask(queryText) }}>
                 <div className="quantixa-input-row">
                   <input
                     className="quantixa-input"
                     value={queryText}
                     onChange={(event) => setQueryText(event.target.value)}
-                    placeholder={`Type to QUANTIXA about ${pageConfig.inputHint}`}
+                    placeholder="Ask about cash, stock, a customer, tax, or any page"
+                    enterKeyHint="send"
                   />
                   <button
                     type="button"
@@ -389,13 +284,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
                   >
                     <Mic size={18} strokeWidth={2.2} />
                   </button>
-                  <button
-                    type="button"
-                    className="quantixa-input-button"
-                    onClick={() => answerQuestion(queryText)}
-                    aria-label="Send question"
-                    title="Send question"
-                  >
+                  <button type="submit" className="quantixa-input-button" aria-label="Send question" title="Send question">
                     <Send size={18} strokeWidth={2.2} />
                   </button>
                 </div>
@@ -408,11 +297,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
                   </div>
                 )}
                 {voiceMessage && !voiceActive && <div className="quantixa-voice-message" role="status">{voiceMessage}</div>}
-                <div className="quantixa-answer" role="status" aria-live="polite">
-                  <span>Answer</span>
-                  <strong>{assistantResponse}</strong>
-                </div>
-              </div>
+              </form>
             </div>
           )}
         </div>
