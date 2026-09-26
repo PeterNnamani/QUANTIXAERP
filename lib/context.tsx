@@ -1016,12 +1016,18 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    loadRemoteData().finally(() => {
+    const markReady = () => {
       if (mounted) setSubscriptionLoaded(true)
+    }
+    const readyTimer = setTimeout(markReady, 15000)
+    loadRemoteData().finally(() => {
+      clearTimeout(readyTimer)
+      markReady()
     })
 
     return () => {
       mounted = false
+      clearTimeout(readyTimer)
       if (trialExpiryTimer.current) clearTimeout(trialExpiryTimer.current)
     }
   }, [user?.companyId])
@@ -1038,38 +1044,52 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
   // Load from localStorage or sessionStorage on mount
   useEffect(() => {
-    const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
-    let companyId = user?.companyId
+    try {
+      const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
+      let companyId = user?.companyId
 
-    if (savedUser) {
-      try {
-        const parsed = JSON.parse(savedUser)
-        const enriched = enrichStoredUser(parsed)
-        companyId = enriched.companyId || companyId
-        setUser(enriched)
-        // persist back the enriched user so other sessions/readers get visibleMenus
-        const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
-        storage.setItem(AUTH_KEY, JSON.stringify(enriched))
-      } catch (e) {
-        setUser(JSON.parse(savedUser))
+      if (savedUser) {
+        try {
+          const parsed = JSON.parse(savedUser)
+          const enriched = enrichStoredUser(parsed)
+          companyId = enriched.companyId || companyId
+          setUser(enriched)
+          // persist back the enriched user so other sessions/readers get visibleMenus
+          const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
+          storage.setItem(AUTH_KEY, JSON.stringify(enriched))
+        } catch (e) {
+          try {
+            setUser(JSON.parse(savedUser))
+          } catch {
+            localStorage.removeItem(AUTH_KEY)
+            sessionStorage.removeItem(AUTH_KEY)
+          }
+        }
       }
+      const savedState = companyId
+        ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
+        : null
+      if (savedState) {
+        try {
+          const parsedState = JSON.parse(savedState)
+          setState({
+            ...defaultState,
+            ...parsedState,
+            companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
+            expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
+            inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
+            roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
+            staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
+          })
+        } catch (error) {
+          console.error('Unable to restore saved company books', error)
+        }
+      }
+    } catch (error) {
+      console.error('Unable to restore the saved session', error)
+    } finally {
+      setIsLoading(false)
     }
-    const savedState = companyId
-      ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
-      : null
-    if (savedState) {
-      const parsedState = JSON.parse(savedState)
-      setState({
-        ...defaultState,
-        ...parsedState,
-        companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
-        expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
-        inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
-        roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
-        staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
-      })
-    }
-    setIsLoading(false)
   }, [user?.companyId])
 
   const updateState = (updates: Partial<AppState>, options: { persist?: boolean } = {}) => {
