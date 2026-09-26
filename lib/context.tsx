@@ -56,6 +56,7 @@ import { generateSku } from '@/lib/sku'
 import { EXP_CATS } from '@/lib/utils'
 import { setExportCompanyName } from '@/lib/export-utils'
 import { mergeReceivablesFromSales } from '@/lib/receivables'
+import { bankTxnKey, businessReference, isUuid, isoDate, selectUnpostedJournals, shouldPostExpenseCash, subledgerReference } from '@/lib/accounting/sync'
 
 export interface User {
   companyId?: string
@@ -476,9 +477,9 @@ function normalizeRemoteSales(data: any[], saleItems: any[] = []): AppState['sal
     itemsBySale.set(item.sale_id, items)
   })
   return (data || []).map((item: any) => ({
-    id: item.id,
-    reference: item.reference || '',
-    date: item.sale_date || item.created_at?.slice(0, 10) || '',
+    id: businessReference({ id: item.id, reference: item.reference }) || item.id,
+    reference: item.reference || item.id,
+    date: isoDate(item.sale_date || item.created_at),
     customer: item.contacts?.name || item.customer_name || item.customer_id || 'Unknown Customer',
     customerDetails: item.contacts ? { phone: item.contacts.phone || '', email: item.contacts.email || '', address: item.contacts.address || '' } : undefined,
     items: itemsBySale.get(item.id) || [],
@@ -499,8 +500,9 @@ function normalizeRemoteSales(data: any[], saleItems: any[] = []): AppState['sal
 
 function normalizeRemotePurchases(data: any[]): AppState['purchases'] {
   return (data || []).map((item: any) => ({
-    id: item.id,
-    date: item.purchase_date || item.created_at?.slice(0, 10) || '',
+    id: businessReference({ id: item.id, reference: item.reference }) || item.id,
+    reference: item.reference || item.id,
+    date: isoDate(item.purchase_date || item.created_at),
     dept: item.department || '',
     product: item.product_name || item.purchase_items?.[0]?.product_name || item.reference || '',
     qty: Number(item.qty || item.purchase_items?.[0]?.qty || 0),
@@ -535,16 +537,85 @@ function normalizeRemotePurchases(data: any[]): AppState['purchases'] {
 
 function normalizeRemoteExpenses(data: any[]): AppState['expenses'] {
   return (data || []).map((item: any) => ({
-    id: item.id,
-    date: item.expense_date || item.created_at?.slice(0, 10) || '',
+    id: businessReference({ id: item.id, reference: item.reference }) || item.id,
+    reference: item.reference || item.id,
+    date: isoDate(item.expense_date || item.created_at),
     desc: item.description || item.reference || '',
     category: item.category || '',
     amount: Number(item.amount || 0),
-    bank: item.bank_account_id || '',
+    bank: item.bank_accounts?.name || '',
     notes: item.notes || '',
     status: item.status || '',
     enteredBy: item.entered_by || 'System',
   }))
+}
+
+function subledgerBalance(item: any) {
+  const original = Number(item.original_amount ?? item.amount ?? item.total ?? 0)
+  const outstanding = Number(item.outstanding_amount ?? item.balance ?? item.balanceDue ?? item.balance_due ?? original)
+  const paid = Number(item.amount_paid ?? item.amountPaid ?? item.paid ?? Math.max(0, original - outstanding))
+  return { original, outstanding, paid }
+}
+
+function normalizeRemoteReceivables(data: any[]) {
+  return (data || []).map((item: any) => {
+    const amounts = subledgerBalance(item)
+    const name = item.contacts?.name || item.customer || item.name || 'Unknown Customer'
+    return {
+      ...item,
+      id: item.id,
+      contact_id: item.contact_id,
+      reference: item.reference || item.invoice || item.id,
+      customer: name,
+      name,
+      invoice: item.invoice || item.reference || item.id,
+      invoiceDate: isoDate(item.invoice_date || item.due_date),
+      dueDate: isoDate(item.due_date || item.dueDate),
+      due: isoDate(item.due_date || item.dueDate),
+      total: amounts.original,
+      amount: amounts.original,
+      original_amount: amounts.original,
+      paid: amounts.paid,
+      amountPaid: amounts.paid,
+      amount_paid: amounts.paid,
+      balance: amounts.outstanding,
+      balanceDue: amounts.outstanding,
+      outstanding_amount: amounts.outstanding,
+      status: item.status || 'open',
+      sourceSaleId: item.reference || item.sourceSaleId,
+    }
+  })
+}
+
+function normalizeRemotePayables(data: any[]) {
+  return (data || []).map((item: any) => {
+    const amounts = subledgerBalance(item)
+    const name = item.contacts?.name || item.supplier || item.name || 'Unknown Supplier'
+    return {
+      ...item,
+      id: item.id,
+      contact_id: item.contact_id,
+      reference: item.reference || item.invoice_number || item.id,
+      supplier: name,
+      name,
+      invoice: item.invoice || item.invoice_number || item.reference || item.id,
+      invoiceNumber: item.invoice_number || item.invoice || item.reference || '',
+      purchaseRef: item.reference || item.purchaseRef || '',
+      invoiceDate: isoDate(item.purchase_date || item.due_date),
+      dueDate: isoDate(item.due_date || item.dueDate),
+      due: isoDate(item.due_date || item.dueDate),
+      total: amounts.original,
+      amount: amounts.original,
+      original_amount: amounts.original,
+      paid: amounts.paid,
+      amountPaid: amounts.paid,
+      amount_paid: amounts.paid,
+      balance: amounts.outstanding,
+      balanceDue: amounts.outstanding,
+      outstanding_amount: amounts.outstanding,
+      status: item.status || 'open',
+    }
+  })
 }
 
 function normalizeRemoteInventory(data: any[]): AppState['inventory'] {
@@ -717,17 +788,17 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           supabase.from('sales').select('*, contacts(name,phone,email,address)').eq('company_id', companyId).order('sale_date', { ascending: false }).limit(200),
           supabase.from('sale_items').select('*').eq('company_id', companyId),
           supabase.from('purchases').select('*, contacts(name), purchase_items(*)').eq('company_id', companyId).order('purchase_date', { ascending: false }).limit(200),
-          supabase.from('expenses').select('*').eq('company_id', companyId).order('expense_date', { ascending: false }).limit(200),
+          supabase.from('expenses').select('*, bank_accounts(name)').eq('company_id', companyId).order('expense_date', { ascending: false }).limit(200),
           supabase.from('expense_categories').select('name').eq('company_id', companyId).order('name'),
           supabase.from('products').select('*').eq('company_id', companyId).is('deleted_at', null).order('updated_at', { ascending: false }).limit(200),
           supabase.from('prepayments').select('*, prepayment_schedules(*)').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('contacts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('bank_accounts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(100),
-          supabase.from('bank_transactions').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
+          supabase.from('bank_transactions').select('*, bank_accounts(name)').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('loans').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('loan_repayments').select('*, bank_accounts(name)').eq('company_id', companyId).order('repayment_date', { ascending: false }).limit(500),
-          supabase.from('receivables').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
-          supabase.from('payables').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
+          supabase.from('receivables').select('*, contacts(name)').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
+          supabase.from('payables').select('*, contacts(name)').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('chart_of_accounts').select('*').eq('company_id', companyId).order('code'),
           supabase.from('journal_entries').select('*').eq('company_id', companyId).order('entry_date', { ascending: false }).limit(1000),
           supabase.from('journal_lines').select('*').eq('company_id', companyId).limit(5000),
@@ -784,7 +855,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         const remoteExpenses = expensesData && expensesData.length > 0 ? normalizeRemoteExpenses(expensesData) : []
         const remoteExpenseCategories = (categoriesData || []).map((item: any) => item.name).filter(Boolean)
         const remoteInventory = inventoryData && inventoryData.length > 0 ? normalizeRemoteInventory(inventoryData) : []
-        const remoteReceivables = mergeReceivablesFromSales(remoteSales, receivablesData || [])
+        const remoteReceivables = mergeReceivablesFromSales(remoteSales, normalizeRemoteReceivables(receivablesData || []))
         const remotePrepayments = prepaymentsErr && prepaymentsErr.code === 'PGRST205'
           ? []
           : prepaymentsData && prepaymentsData.length > 0
@@ -811,7 +882,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           loans: loansErr ? prev.loans : normalizeRemoteLoans(loansData || []),
           loanRepayments: loanRepaymentsErr ? prev.loanRepayments : normalizeRemoteLoanRepayments(loanRepaymentsData || []),
           receivables: receivablesErr ? prev.receivables : remoteReceivables,
-          payables: payablesErr ? prev.payables : (payablesData || []),
+          payables: payablesErr ? prev.payables : normalizeRemotePayables(payablesData || []),
           chartOfAccounts: accountsErr ? prev.chartOfAccounts : dedupeChartOfAccounts((accountsData || []).map((account: any) => ({
             id: account.id, code: account.code, name: account.name, accountType: account.account_type,
             accountSubType: account.account_subtype, normalBalance: account.normal_balance,
@@ -819,7 +890,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             openingBalance: Number(account.opening_balance || 0), openingBalanceDate: account.opening_balance_date,
           }))),
           journalEntries: entriesErr ? prev.journalEntries : (entriesData || []).map((entry: any) => ({
-            id: entry.id, entryDate: entry.entry_date, periodId: entry.period_id, reference: entry.reference || '',
+            id: entry.id, entryDate: isoDate(entry.entry_date), periodId: entry.period_id, reference: entry.reference || '',
             description: entry.description || '', sourceModule: entry.source_module, sourceId: entry.source_id,
             status: entry.status, createdBy: entry.created_by || 'System', createdAt: entry.created_at,
           })),
@@ -891,7 +962,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             description: t.description ?? '',
             attachments: 0,
             type: Number(t.amount) >= 0 ? 'Deposit' : 'Withdrawal',
-            bank: t.bank_account_id,
+            bank: t.bank_accounts?.name || '',
             created_at: t.created_at,
           }))
           setState((prev) => ({ ...prev, bankTxns: normalized }))
@@ -1057,7 +1128,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               }
               const saleRow = {
                 company_id: companyId,
-                reference: sale.id,
+                reference: businessReference(sale),
                 sale_date: sale.date,
                 customer_id: customer.id,
                 branch: sale.branch || null,
@@ -1103,9 +1174,10 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
                 if (result.error) throw result.error
                 supplier = result.data
               }
+              const purchaseReference = businessReference(purchase)
               const { data: storedPurchase, error: purchaseError } = await supabase.from('purchases').upsert({
                 company_id: companyId,
-                reference: purchase.id,
+                reference: purchaseReference,
                 purchase_date: purchase.date,
                 supplier_id: supplier.id,
                 branch: purchase.branch || null,
@@ -1127,17 +1199,38 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
                 purge_after: (purchase as any).purgeAfter || null,
               }, { onConflict: 'reference' }).select('id').single()
               if (purchaseError) throw purchaseError
-              const { error: purchaseItemError } = await supabase.from('purchase_items').upsert({
-                company_id: companyId,
-                purchase_id: storedPurchase.id,
-                product_name: purchase.product,
-                qty: purchase.qty,
-                unit_price: purchase.unitPrice,
-                discount: purchase.discount || 0,
-                tax: purchase.items?.[0]?.tax || 0,
-                total: purchase.total || 0,
-              })
-              if (purchaseItemError) throw purchaseItemError
+              const { error: deletePurchaseItemsError } = await supabase.from('purchase_items').delete().eq('purchase_id', storedPurchase.id)
+              if (deletePurchaseItemsError) throw deletePurchaseItemsError
+              const purchaseItems = (purchase.items?.length ? purchase.items : [{ product: purchase.product, qty: purchase.qty, unitPrice: purchase.unitPrice, discount: purchase.discount || 0, tax: purchase.items?.[0]?.tax || 0, total: purchase.total || 0 }]).filter((item) => item.product)
+              if (purchaseItems.length > 0) {
+                const { error: purchaseItemError } = await supabase.from('purchase_items').insert(purchaseItems.map((item) => ({
+                  company_id: companyId,
+                  purchase_id: storedPurchase.id,
+                  product_name: item.product,
+                  qty: item.qty,
+                  unit_price: item.unitPrice,
+                  discount: item.discount || 0,
+                  tax: item.tax || 0,
+                  total: item.total || 0,
+                })))
+                if (purchaseItemError) throw purchaseItemError
+              }
+              const outstanding = Number(purchase.balance ?? Math.max(0, Number(purchase.total || 0) - Number(purchase.amountPaid || 0)))
+              if (supplier?.id && purchaseReference && outstanding > 0) {
+                const { error: payableError } = await supabase.from('payables').upsert({
+                  company_id: companyId,
+                  contact_id: supplier.id,
+                  reference: purchaseReference,
+                  due_date: purchase.dueDate || purchase.date || new Date().toISOString().slice(0, 10),
+                  original_amount: Number(purchase.total || 0),
+                  outstanding_amount: outstanding,
+                  status: 'open',
+                }, { onConflict: 'reference' })
+                if (payableError) console.error('Unable to sync purchase payable', payableError)
+              } else if (purchaseReference) {
+                const { error: payableError } = await supabase.from('payables').update({ outstanding_amount: 0, status: 'paid', updated_at: new Date().toISOString() }).eq('company_id', companyId).eq('reference', purchaseReference)
+                if (payableError) console.error('Unable to clear purchase payable', payableError)
+              }
             }
           }
 
@@ -1173,7 +1266,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               ; (accounts || []).forEach((account: any) => { accountIds[account.name] = account.id })
             const expenseRows = (normalizedUpdates.expenses as Expense[]).map((expense) => ({
               company_id: companyId,
-              reference: expense.id,
+              reference: businessReference(expense),
               expense_date: expense.date,
               description: expense.desc,
               category: expense.category,
@@ -1186,12 +1279,26 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             }))
             const { error: expensesPersistErr } = await supabase.from('expenses').upsert(expenseRows, { onConflict: 'reference' })
             if (expensesPersistErr) throw expensesPersistErr
+            const expenseReferences = expenseRows.map((row) => row.reference).filter(Boolean)
+            const postedKeys = new Set<string>()
+            if (expenseReferences.length > 0) {
+              const [{ data: bySource }, { data: byReference }] = await Promise.all([
+                supabase.from('journal_entries').select('source_id,reference').eq('company_id', companyId).in('source_id', expenseReferences),
+                supabase.from('journal_entries').select('source_id,reference').eq('company_id', companyId).in('reference', expenseReferences),
+              ])
+              for (const row of [...(bySource || []), ...(byReference || [])]) {
+                if (row.source_id) postedKeys.add(row.source_id)
+                if (row.reference) postedKeys.add(row.reference)
+              }
+            }
             for (const expense of normalizedUpdates.expenses as Expense[]) {
+              if (!shouldPostExpenseCash(expense, postedKeys)) continue
+              const reference = businessReference(expense)
               const { error: postingError } = await supabase.rpc('post_accounting_cash_movement', {
                 p_company_id: companyId,
                 p_source_module: 'EXPENSE_PAYMENT',
-                p_source_id: expense.id,
-                p_reference: expense.id,
+                p_source_id: reference,
+                p_reference: reference,
                 p_entry_date: expense.date,
                 p_description: expense.desc,
                 p_amount: expense.amount,
@@ -1199,7 +1306,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
                 p_offset_account_name: 'Expense Account',
                 p_direction: 'withdrawal',
               })
-              if (postingError) throw postingError
+              if (postingError) console.error('Unable to post expense journal', postingError)
+              else postedKeys.add(reference)
             }
           }
 
@@ -1245,7 +1353,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.chartOfAccounts) {
-            const accountRows = (normalizedUpdates.chartOfAccounts as LedgerAccount[]).map((account) => ({
+            const accountRows = (normalizedUpdates.chartOfAccounts as LedgerAccount[]).filter((account) => isUuid(account.id)).map((account) => ({
               id: account.id,
               company_id: companyId,
               code: account.code,
@@ -1260,41 +1368,123 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               opening_balance_date: account.openingBalanceDate || null,
               updated_at: new Date().toISOString(),
             }))
-            const { error: accountsPersistErr } = await supabase.from('chart_of_accounts').upsert(accountRows, { onConflict: 'id' })
-            if (accountsPersistErr) throw accountsPersistErr
+            if (accountRows.length > 0) {
+              const { error: accountsPersistErr } = await supabase.from('chart_of_accounts').upsert(accountRows, { onConflict: 'id' })
+              if (accountsPersistErr) throw accountsPersistErr
+            }
           }
 
-          if (normalizedUpdates.journalEntries) {
-            const entryRows = (normalizedUpdates.journalEntries as JournalEntry[]).map((entry) => ({
-              id: entry.id,
-              company_id: companyId,
-              entry_date: entry.entryDate,
-              period_id: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(entry.periodId || '') ? entry.periodId : null,
-              reference: entry.reference || null,
-              description: entry.description || null,
-              source_module: entry.sourceModule || 'MANUAL',
-              source_id: entry.sourceId || null,
-              status: entry.status || 'POSTED',
-              created_by: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(entry.createdBy || '') ? entry.createdBy : null,
-              updated_at: new Date().toISOString(),
-            }))
-            const { error: entriesPersistErr } = await supabase.from('journal_entries').upsert(entryRows, { onConflict: 'id' })
-            if (entriesPersistErr) throw entriesPersistErr
+          if (normalizedUpdates.journalEntries || normalizedUpdates.journalLines) {
+            const journalIds = newState.journalEntries.map((entry) => entry.id).filter((id) => isUuid(id))
+            const { data: existingJournals } = journalIds.length > 0
+              ? await supabase.from('journal_entries').select('id').eq('company_id', companyId).in('id', journalIds)
+              : { data: [] }
+            const pendingJournals = selectUnpostedJournals(newState.journalEntries, newState.journalLines, (existingJournals || []).map((row: { id: string }) => row.id))
+            if (pendingJournals.entries.length > 0) {
+              const entryRows = pendingJournals.entries.map((entry) => ({
+                id: entry.id,
+                company_id: companyId,
+                entry_date: entry.entryDate,
+                period_id: isUuid(entry.periodId) ? entry.periodId : null,
+                reference: entry.reference || null,
+                description: entry.description || null,
+                source_module: entry.sourceModule || 'MANUAL',
+                source_id: entry.sourceId || null,
+                status: 'DRAFT',
+                created_by: isUuid(entry.createdBy) ? entry.createdBy : null,
+                updated_at: new Date().toISOString(),
+              }))
+              const { error: entriesPersistErr } = await supabase.from('journal_entries').insert(entryRows)
+              if (entriesPersistErr) throw entriesPersistErr
+              const lineRows = pendingJournals.lines.map((line) => ({
+                id: line.id,
+                company_id: companyId,
+                entry_id: line.entryId,
+                account_id: line.accountId,
+                debit: line.debit || 0,
+                credit: line.credit || 0,
+                description: line.description || null,
+              }))
+              const { error: linesPersistErr } = await supabase.from('journal_lines').insert(lineRows)
+              if (linesPersistErr) throw linesPersistErr
+              const { error: postErr } = await supabase.from('journal_entries').update({ status: 'POSTED' }).in('id', pendingJournals.entries.map((entry) => entry.id))
+              if (postErr) throw postErr
+            }
           }
 
-          if (normalizedUpdates.journalLines) {
-            const lineRows = (normalizedUpdates.journalLines as JournalLine[]).map((line) => ({
-              id: line.id,
-              company_id: companyId,
-              entry_id: line.entryId,
-              account_id: line.accountId,
-              debit: line.debit || 0,
-              credit: line.credit || 0,
-              description: line.description || null,
-            }))
-            const { error: linesPersistErr } = await supabase.from('journal_lines').upsert(lineRows, { onConflict: 'id' })
-            if (linesPersistErr) throw linesPersistErr
+          const postSubledgerCash = async (transactions: any[]) => {
+            for (const txn of transactions) {
+              const description = String(txn.description || '')
+              const isReceipt = description.startsWith('Receivable payment')
+              const isSupplierPayment = description.startsWith('Payable payment')
+              const reference = businessReference(txn)
+              const amount = Math.abs(Number(txn.amount || 0))
+              if ((!isReceipt && !isSupplierPayment) || !reference || amount <= 0) continue
+              const { error: postingError } = await supabase.rpc('post_accounting_cash_movement', {
+                p_company_id: companyId,
+                p_source_module: isReceipt ? 'RECEIVABLE_PAYMENT' : 'PAYABLE_PAYMENT',
+                p_source_id: reference,
+                p_reference: reference,
+                p_entry_date: txn.date || new Date().toISOString().slice(0, 10),
+                p_description: description,
+                p_amount: amount,
+                p_bank_account_name: txn.bank || null,
+                p_offset_account_name: isReceipt ? 'Receivables' : 'Payables',
+                p_direction: isReceipt ? 'deposit' : 'withdrawal',
+              })
+              if (postingError) console.error('Unable to post subledger cash movement', postingError)
+            }
           }
+
+          if (normalizedUpdates.bankTxns) {
+            const existingTxnIds = new Set((prev.bankTxns || []).map((txn: { id?: string }) => txn.id))
+            await postSubledgerCash((normalizedUpdates.bankTxns as any[]).filter((txn) => txn?.id && !existingTxnIds.has(txn.id)))
+          }
+
+          const persistOpenItems = async (table: 'receivables' | 'payables', rows: any[], previousRows: any[], contactType: 'customer' | 'supplier', labelOf: (row: any) => string) => {
+            const nextReferences = new Set<string>()
+            for (const row of rows) {
+              const reference = subledgerReference(row)
+              if (!reference) continue
+              nextReferences.add(reference)
+              const label = labelOf(row)
+              let contactId = isUuid(row.contact_id) ? row.contact_id : ''
+              if (!contactId && label) {
+                let { data: contact } = await supabase.from('contacts').select('id').eq('company_id', companyId).eq('type', contactType).eq('name', label).maybeSingle()
+                if (!contact) {
+                  const created = await supabase.from('contacts').insert({ company_id: companyId, type: contactType, name: label }).select('id').single()
+                  if (created.error) {
+                    console.error(`Unable to save ${table} contact`, created.error)
+                    continue
+                  }
+                  contact = created.data
+                }
+                contactId = contact?.id || ''
+              }
+              if (!contactId) continue
+              const original = Number(row.original_amount ?? row.amount ?? row.total ?? 0)
+              const outstanding = Number(row.outstanding_amount ?? row.balance ?? row.balanceDue ?? row.balance_due ?? 0)
+              const { error } = await supabase.from(table).upsert({
+                company_id: companyId,
+                contact_id: contactId,
+                reference,
+                due_date: isoDate(row.dueDate || row.due || row.invoiceDate) || new Date().toISOString().slice(0, 10),
+                original_amount: original,
+                outstanding_amount: outstanding,
+                status: outstanding <= 0 ? 'paid' : 'open',
+              }, { onConflict: 'reference' })
+              if (error) console.error(`Unable to save ${table}`, error)
+            }
+            for (const previous of previousRows) {
+              const reference = subledgerReference(previous)
+              if (!reference || nextReferences.has(reference)) continue
+              const { error } = await supabase.from(table).update({ outstanding_amount: 0, status: 'paid', updated_at: new Date().toISOString() }).eq('company_id', companyId).eq('reference', reference)
+              if (error) console.error(`Unable to close ${table}`, error)
+            }
+          }
+
+          if (normalizedUpdates.receivables) await persistOpenItems('receivables', normalizedUpdates.receivables as any[], prev.receivables || [], 'customer', (row) => row.customer || row.name || '')
+          if (normalizedUpdates.payables) await persistOpenItems('payables', normalizedUpdates.payables as any[], prev.payables || [], 'supplier', (row) => row.supplier || row.name || '')
 
           if (normalizedUpdates.banks && !normalizedUpdates.bankAccounts) {
             const banksArray = Object.entries(normalizedUpdates.banks).map(([name, balance]) => ({ company_id: companyId, name, institution: name, balance, status: 'active', updated_at: new Date().toISOString() }))
@@ -1330,16 +1520,23 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
             const txnsToInsert = (normalizedUpdates.bankTxns as any[]).filter((t: any) => String(t.id || '').startsWith('TXN-')).map((t: any) => ({
               company_id: companyId,
-              id: t.id?.startsWith('TXN-') ? undefined : t.id,
               bank_account_id: nameToId[t.bank] ?? null,
               txn_date: t.date ?? new Date().toISOString().slice(0, 10),
               description: t.description ?? t.name ?? '',
               amount: t.amount ?? 0,
               is_reconciled: t.status === 'Completed',
             })).filter((x) => x.bank_account_id)
+            const { data: existingTxns } = await supabase.from('bank_transactions').select('bank_account_id,txn_date,description,amount').eq('company_id', companyId)
+            const existingTxnKeys = new Set((existingTxns || []).map((txn: any) => bankTxnKey(txn.bank_account_id, txn.txn_date, txn.description, txn.amount)))
+            const freshTxns = txnsToInsert.filter((txn) => {
+              const key = bankTxnKey(txn.bank_account_id, txn.txn_date, txn.description, txn.amount)
+              if (existingTxnKeys.has(key)) return false
+              existingTxnKeys.add(key)
+              return true
+            })
 
-            if (txnsToInsert.length > 0) {
-              await supabase.from('bank_transactions').insert(txnsToInsert)
+            if (freshTxns.length > 0) {
+              await supabase.from('bank_transactions').insert(freshTxns)
             }
           }
         } catch (err) {

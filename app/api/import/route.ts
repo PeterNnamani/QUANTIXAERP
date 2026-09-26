@@ -285,27 +285,33 @@ async function insertSaleRecords(sales: any[], contactMap: ContactMap, companyId
     const salesByRef = new Map((storedSales || []).map((item: any) => [item.reference, item.id]))
     const saleItems: any[] = []
 
+    const storedSaleIds = Array.from(salesByRef.values())
+    if (storedSaleIds.length > 0) {
+        const { error: deleteItemsErr } = await supabaseAdmin.from('sale_items').delete().in('sale_id', storedSaleIds)
+        if (deleteItemsErr) throw deleteItemsErr
+    }
+
     sales.forEach((sale) => {
         const reference = String(sale.reference || sale.id || '').trim() || ''
         const saleId = salesByRef.get(reference)
         if (!saleId) return
 
-        const item = sale.items?.[0]
-        if (!item) return
-
-        saleItems.push({
-            company_id: companyId,
-            sale_id: saleId,
-            product_id: item.product_id || null,
-            product_name: String(item.product || item.product_name || item.name || 'Imported Item').trim(),
-            department: item.dept || item.department || null,
-            qty: item.qty || item.quantity || 0,
-            unit_price: item.unitPrice || item.unit_price || 0,
-            discount: item.discount || 0,
-            tax: item.tax || 0,
-            total: item.total || 0,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
+        const items = Array.isArray(sale.items) && sale.items.length > 0 ? sale.items : []
+        items.forEach((item: any) => {
+            saleItems.push({
+                company_id: companyId,
+                sale_id: saleId,
+                product_id: item.product_id || null,
+                product_name: String(item.product || item.product_name || item.name || 'Imported Item').trim(),
+                department: item.dept || item.department || null,
+                qty: item.qty || item.quantity || 0,
+                unit_price: item.unitPrice || item.unit_price || 0,
+                discount: item.discount || 0,
+                tax: item.tax || 0,
+                total: item.total || 0,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
         })
     })
 
@@ -357,27 +363,33 @@ async function insertPurchaseRecords(purchases: any[], contactMap: ContactMap, c
     const purchasesByRef = new Map((storedPurchases || []).map((item: any) => [item.reference, item.id]))
     const purchaseItems: any[] = []
 
+    const storedPurchaseIds = Array.from(purchasesByRef.values())
+    if (storedPurchaseIds.length > 0) {
+        const { error: deleteItemsErr } = await supabaseAdmin.from('purchase_items').delete().in('purchase_id', storedPurchaseIds)
+        if (deleteItemsErr) throw deleteItemsErr
+    }
+
     purchases.forEach((purchase) => {
         const reference = String(purchase.reference || purchase.id || '').trim() || ''
         const purchaseId = purchasesByRef.get(reference)
         if (!purchaseId) return
 
-        const item = purchase.items?.[0]
-        if (!item) return
-
-        purchaseItems.push({
-            company_id: companyId,
-            purchase_id: purchaseId,
-            product_id: item.product_id || null,
-            product_name: String(item.product || item.product_name || item.name || 'Imported Item').trim(),
-            department: item.dept || item.department || null,
-            qty: item.qty || item.quantity || 0,
-            unit_price: item.unitPrice || item.unit_price || 0,
-            discount: item.discount || 0,
-            tax: item.tax || 0,
-            total: item.total || 0,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
+        const items = Array.isArray(purchase.items) && purchase.items.length > 0 ? purchase.items : []
+        items.forEach((item: any) => {
+            purchaseItems.push({
+                company_id: companyId,
+                purchase_id: purchaseId,
+                product_id: item.product_id || null,
+                product_name: String(item.product || item.product_name || item.name || 'Imported Item').trim(),
+                department: item.dept || item.department || null,
+                qty: item.qty || item.quantity || 0,
+                unit_price: item.unitPrice || item.unit_price || 0,
+                discount: item.discount || 0,
+                tax: item.tax || 0,
+                total: item.total || 0,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
         })
     })
 

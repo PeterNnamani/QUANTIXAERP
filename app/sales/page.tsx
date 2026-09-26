@@ -284,6 +284,8 @@ export default function SalesPage() {
       ? state.receivables
       : mergeReceivablesFromSales([sale], state.receivables)
 
+    const postedJournals = Array.isArray(result.journalEntries) ? result.journalEntries : []
+    const postedLines = Array.isArray(result.journalLines) ? result.journalLines : []
     updateState({
       sales: [...state.sales, sale],
       inventory: inventoryUpdates,
@@ -291,6 +293,8 @@ export default function SalesPage() {
       bankAccounts: updatedBankAccounts,
       bankTxns: [...paymentTxn, ...state.bankTxns],
       receivables: nextReceivables,
+      journalEntries: [...postedJournals, ...state.journalEntries],
+      journalLines: [...postedLines, ...state.journalLines],
     })
     setSelectedSaleId(sale.id)
     setCurrentPage(1)

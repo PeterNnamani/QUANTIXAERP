@@ -49,7 +49,7 @@ export default function MonthlyReportPage() {
         if (action === 'Export PDF') {
             void downloadFinancialReportPdf({
                 filename: `monthly-report-${activeRange.toLowerCase()}.pdf`, reportTitle: 'Monthly Report', periodLabel: `${currentMonth} | ${activeRange} view`, companyName: state.companySettings.companyName,
-                highlights: [{ label: 'Revenue', value: formatCurrency(totalRevenue) }, { label: 'Net profit', value: formatCurrency(netProfit) }, { label: 'Inventory value', value: formatCurrency(inventoryValue) }, { label: 'Cash', value: formatCurrency(cashReceived - cashPaid) }],
+                highlights: [{ label: 'Revenue', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Revenue')?.total || 0) }, { label: 'Net profit', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')?.total || 0) }, { label: 'Inventory value', value: formatCurrency(inventoryValue) }, { label: 'Cash', value: formatCurrency(exportReport.notes[2]?.at(-1)?.total || 0) }],
                 sections: managementAccountsToExportSections(exportReport),
                 notes: [`Report range: ${activeRange}.`, `VAT is ${includeVAT ? 'included in the report calculation.' : 'not included in this export.'}`, 'Amounts are calculated from non-void records in the selected calendar month.'],
             })
@@ -57,7 +57,7 @@ export default function MonthlyReportPage() {
 
         if (action === 'Export Excel') {
             setExportCompanyName(state.companySettings.companyName)
-            downloadExcel(`monthly-report-${activeRange.toLowerCase()}.xlsx`, [{ ...reportExportData, ...Object.fromEntries(expenseBreakdown.map(([category, amount]) => [`Expense: ${category}`, amount])), action }])
+            downloadExcel(`monthly-report-${activeRange.toLowerCase()}.xlsx`, [{ ...reportExportData, Revenue: exportReport.pnl.rows.find((row) => row.label === 'Revenue')?.total || 0, NetProfit: exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')?.total || 0, ...Object.fromEntries(expenseBreakdown.map(([category, amount]) => [`Expense: ${category}`, amount])), action }])
         }
     }
 

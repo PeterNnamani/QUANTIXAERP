@@ -13,7 +13,7 @@ type Account = {
     openingBalance?: number
 }
 
-type JournalEntry = { id: string; entryDate: string; status?: string }
+type JournalEntry = { id: string; entryDate: string; status?: string; sourceModule?: string; sourceId?: string | null; reference?: string }
 type JournalLine = { entryId: string; accountId: string; debit?: number; credit?: number; description?: string; segment?: string }
 
 export type ManagementAccountsInput = {
@@ -22,7 +22,7 @@ export type ManagementAccountsInput = {
     chartOfAccounts: Account[]
     journalEntries: JournalEntry[]
     journalLines: JournalLine[]
-    sales?: Array<{ date: string; totalAmount: number; status?: string; items?: Array<{ product: string; dept?: string; total: number }> }>
+    sales?: Array<{ id?: string; reference?: string; date: string; totalAmount: number; status?: string; items?: Array<{ product: string; dept?: string; qty?: number; total: number }> }>
     purchases?: Array<{ date: string; total: number; product?: string; category?: string; status?: string }>
     expenses?: Array<{ date: string; amount: number; category?: string; desc?: string; status?: string }>
     expenseCategories?: string[]
@@ -59,11 +59,40 @@ function matches(account: Account, terms: string[]) {
     return terms.some((term) => text.includes(term))
 }
 
+const entryDay = (entry: JournalEntry) => String(entry.entryDate || '').slice(0, 10)
+const SALES_MODULES = new Set(['SALES', 'SALES_PAYMENT', 'SALES_RECEIVABLE'])
+
 function lineBalance(account: Account, lines: JournalLine[], entries: JournalEntry[], endDate: string, startDate?: string) {
-    const validEntries = new Set(entries.filter((entry) => entry.status === 'POSTED' && entry.entryDate <= endDate && (!startDate || entry.entryDate >= startDate)).map((entry) => entry.id))
+    const validEntries = new Set(entries.filter((entry) => entry.status === 'POSTED' && entryDay(entry) <= endDate && (!startDate || entryDay(entry) >= startDate)).map((entry) => entry.id))
     const value = lines.filter((line) => line.accountId === account.id && validEntries.has(line.entryId)).reduce((total, line) => total + n(line.debit) - n(line.credit), 0)
     const opening = !startDate ? n(account.openingBalance) : 0
     return account.normalBalance === 'CREDIT' ? opening - value : opening + value
+}
+
+function linkedRevenue(input: ManagementAccountsInput, periods: ReportPeriod[]) {
+    const incomeIds = new Set(input.chartOfAccounts.filter((account) => account.accountType === 'INCOME' || matches(account, ['revenue', 'sales income'])).map((account) => account.id))
+    return periodValues(periods, (period) => {
+        const sales = (input.sales || []).filter((sale) => isActive(sale.status) && sale.date >= period.startDate && sale.date <= period.endDate)
+        const saleKeys = new Set(sales.flatMap((sale) => [sale.id, (sale as { reference?: string }).reference].filter(Boolean)))
+        const periodEntries = input.journalEntries.filter((entry) => entry.status === 'POSTED' && entryDay(entry) >= period.startDate && entryDay(entry) <= period.endDate)
+        const entryById = new Map(periodEntries.map((entry) => [entry.id, entry]))
+        const otherIncome = input.journalLines.filter((line) => {
+            const entry = entryById.get(line.entryId)
+            return Boolean(entry && incomeIds.has(line.accountId) && !SALES_MODULES.has(entry.sourceModule || ''))
+        }).reduce((total, line) => total + n(line.credit) - n(line.debit), 0)
+        const orphanSalesIncome = input.journalLines.filter((line) => {
+            const entry = entryById.get(line.entryId)
+            if (!entry || !incomeIds.has(line.accountId) || !SALES_MODULES.has(entry.sourceModule || '')) return false
+            const keys = [entry.sourceId, entry.reference].filter(Boolean)
+            return !keys.some((key) => saleKeys.has(String(key)))
+        }).reduce((total, line) => total + n(line.credit) - n(line.debit), 0)
+        return sum(sales.map((sale) => n(sale.totalAmount))) + otherIncome + orphanSalesIncome
+    })
+}
+
+function soldCostOfGoods(input: ManagementAccountsInput, periods: ReportPeriod[]) {
+    const costs = new Map((input.inventory || []).map((item) => [clean(item.product), n(item.unitCost)]))
+    return periodValues(periods, (period) => sum((input.sales || []).filter((sale) => isActive(sale.status) && sale.date >= period.startDate && sale.date <= period.endDate).flatMap((sale) => (sale.items || []).map((item) => n(item.qty) * (costs.get(clean(item.product || '')) || 0)))))
 }
 
 function accountValue(accounts: Account[], lines: JournalLine[], entries: JournalEntry[], terms: string[], endDate: string) {
@@ -82,14 +111,14 @@ function operatingRows(input: ManagementAccountsInput, periods: ReportPeriod[]) 
     const accounts = input.chartOfAccounts
     const entries = input.journalEntries
     const lines = input.journalLines
-    const ledgerRevenue = periodValues(periods, (period) => sum(accounts.filter((account) => account.accountType === 'INCOME' || matches(account, ['revenue', 'sales income'])).map((account) => Math.abs(lineBalance(account, lines, entries, period.endDate, period.startDate)))))
     const ledgerCogs = periodValues(periods, (period) => sum(accounts.filter((account) => matches(account, ['cost of sales', 'cost of goods', 'cogs'])).map((account) => Math.abs(lineBalance(account, lines, entries, period.endDate, period.startDate)))))
-    const transactionRevenue = periodValues(periods, (period) => transactionPeriodValue(period, (input.sales || []).map((sale) => ({ date: sale.date, amount: sale.totalAmount, status: sale.status }))))
     const transactionCogs = periodValues(periods, (period) => transactionPeriodValue(period, (input.purchases || [])
         .filter((purchase) => !['Assets', 'Furniture', 'Electronics', 'Fixed Asset'].includes(purchase.category || ''))
         .map((purchase) => ({ date: purchase.date, amount: purchase.total, status: purchase.status }))))
-    const revenue = sum(ledgerRevenue) > 0.005 ? ledgerRevenue : transactionRevenue
-    const cogs = sum(ledgerCogs) > 0.005 ? ledgerCogs : transactionCogs
+    const soldCogs = soldCostOfGoods(input, periods)
+    const revenue = linkedRevenue(input, periods)
+    const hasSales = (input.sales || []).some((sale) => isActive(sale.status))
+    const cogs = sum(ledgerCogs) > 0.005 ? ledgerCogs : hasSales ? soldCogs : transactionCogs
     const expenseLabels = [...new Set([
         'Admin/Overhead',
         'Office Supplies & Consumables',
@@ -102,7 +131,7 @@ function operatingRows(input: ManagementAccountsInput, periods: ReportPeriod[]) 
         'Fines & Penalties',
         ...(input.expenseCategories || []),
         ...(input.expenses || []).map((expense) => expense.category || 'Uncategorised'),
-    ])].filter((label) => !['Cost of Goods Sold', 'Drawings', 'Fixed Asset'].includes(label))
+    ])].filter((label) => !['Cost of Goods Sold', 'Drawings', 'Fixed Asset'].includes(label) && !/finance cost|interest|bank charge/i.test(label))
     const expenses = expenseLabels.map((label) => {
         const values = periodValues(periods, (period) => sum((input.expenses || [])
             .filter((expense) => isActive(expense.status) && expense.category === label && expense.date >= period.startDate && expense.date <= period.endDate)

@@ -30,7 +30,7 @@ export function buildReceivableFromSale(sale: {
     branch?: string
 }): ReceivableRecord {
     const total = Number(sale.totalAmount || 0)
-    const isCredit = ['CREDIT', 'PART PAYMENT'].includes(String(sale.paymentStatus || '').toUpperCase())
+    const isCredit = ['CREDIT', 'PART PAYMENT', 'PARTIAL', 'OVERDUE', 'UNPAID'].includes(String(sale.paymentStatus || '').toUpperCase())
     const paid = isCredit ? Math.min(Math.max(Number(sale.amountPaid || 0), 0), total) : 0
     if (!isCredit) {
         return {
@@ -99,7 +99,7 @@ export function mergeReceivablesFromSales(
 
     const nextBySale = new Map<string, ReceivableRecord>()
     for (const sale of sales) {
-        if (!['CREDIT', 'PART PAYMENT'].includes(String(sale.paymentStatus || '').toUpperCase())) continue
+        if (!['CREDIT', 'PART PAYMENT', 'PARTIAL', 'OVERDUE', 'UNPAID'].includes(String(sale.paymentStatus || '').toUpperCase())) continue
         nextBySale.set(sale.id, buildReceivableFromSale(sale))
     }
 

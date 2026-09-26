@@ -49,7 +49,7 @@ export default function AnnualReportPage() {
         if (action === 'Export PDF') {
             void downloadFinancialReportPdf({
                 filename: 'annual-report.pdf', reportTitle: 'Annual Report', periodLabel: currentYear, companyName: state.companySettings.companyName,
-                highlights: [{ label: 'Revenue', value: formatCurrency(annualRevenue) }, { label: 'Net profit', value: formatCurrency(annualNetProfit) }, { label: 'Total assets', value: formatCurrency(totalAssets) }, { label: 'Cash', value: formatCurrency(cashReceived - cashPaid) }],
+                highlights: [{ label: 'Revenue', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Revenue')?.total || 0) }, { label: 'Net profit', value: formatCurrency(exportReport.pnl.rows.find((row) => row.label === 'Profit/(Loss) for the Period')?.total || 0) }, { label: 'Total assets', value: formatCurrency(totalAssets) }, { label: 'Cash', value: formatCurrency(exportReport.notes[2]?.at(-1)?.total || 0) }],
                 sections: managementAccountsToExportSections(exportReport, false),
                 notes: [`Report mode: ${reportMode}; selected statement: ${selectedStatement}.`, `VAT is ${includeVAT ? 'included in the report calculation.' : 'not included in this export.'}`, 'Amounts are calculated from non-void records in the current accounting year.'],
             })

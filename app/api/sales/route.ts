@@ -10,6 +10,88 @@ function missingSchemaColumn(error: unknown, values: Record<string, unknown>): s
     return column && Object.prototype.hasOwnProperty.call(values, column) ? column : null
 }
 
+async function loadPostedJournal(entryId: string | undefined) {
+    if (!entryId || !supabaseAdmin) return null
+    const { data: entry, error: entryError } = await supabaseAdmin
+        .from('journal_entries')
+        .select('id,entry_date,reference,description,source_module,source_id,status')
+        .eq('id', entryId)
+        .maybeSingle()
+    if (entryError) throw entryError
+    if (!entry) return null
+    const { data: lines, error: lineError } = await supabaseAdmin
+        .from('journal_lines')
+        .select('id,entry_id,account_id,debit,credit,description')
+        .eq('entry_id', entryId)
+    if (lineError) throw lineError
+    return {
+        entry: {
+            id: entry.id,
+            entryDate: entry.entry_date,
+            reference: entry.reference || '',
+            description: entry.description || '',
+            sourceModule: entry.source_module,
+            sourceId: entry.source_id,
+            status: entry.status,
+        },
+        lines: (lines || []).map((line) => ({
+            id: line.id,
+            entryId: line.entry_id,
+            accountId: line.account_id,
+            debit: Number(line.debit || 0),
+            credit: Number(line.credit || 0),
+            description: line.description || '',
+        })),
+    }
+}
+
+async function postReceivableSale(companyId: string, sale: { id: string; date?: string }, amount: number) {
+    const sourceId = String(sale.id)
+    const { data: existing, error: existingError } = await supabaseAdmin!
+        .from('journal_entries')
+        .select('id')
+        .eq('company_id', companyId)
+        .eq('source_module', 'SALES_RECEIVABLE')
+        .eq('source_id', sourceId)
+        .limit(1)
+    if (existingError) throw existingError
+    if (existing && existing.length > 0) return loadPostedJournal(existing[0].id)
+
+    const { data: accounts, error: accountError } = await supabaseAdmin!
+        .from('chart_of_accounts')
+        .select('id,name')
+        .eq('company_id', companyId)
+        .in('name', ['Receivables', 'Sales Revenue'])
+    if (accountError) throw accountError
+    const debit = (accounts || []).find((account) => account.name === 'Receivables')
+    const credit = (accounts || []).find((account) => account.name === 'Sales Revenue')
+    if (!debit || !credit) throw new Error('Receivables and Sales Revenue accounts are required before a credit sale can post.')
+
+    const description = `Credit sale ${sourceId}`
+    const { data: entry, error: entryError } = await supabaseAdmin!
+        .from('journal_entries')
+        .insert({
+            company_id: companyId,
+            entry_date: sale.date || new Date().toISOString().slice(0, 10),
+            reference: sourceId,
+            description,
+            source_module: 'SALES_RECEIVABLE',
+            source_id: sourceId,
+            status: 'DRAFT',
+        })
+        .select('id')
+        .single()
+    if (entryError) throw entryError
+    const { error: lineError } = await supabaseAdmin!.from('journal_lines').insert([
+        { company_id: companyId, entry_id: entry.id, account_id: debit.id, debit: amount, credit: 0, description },
+        { company_id: companyId, entry_id: entry.id, account_id: credit.id, debit: 0, credit: amount, description },
+    ])
+    if (lineError) throw lineError
+    const { error: postError } = await supabaseAdmin!.from('journal_entries').update({ status: 'POSTED' }).eq('id', entry.id)
+    if (postError) throw postError
+    return loadPostedJournal(entry.id)
+}
+
 async function upsertSaleWithSchemaFallback(saleRow: Record<string, unknown>) {
     const compatibleSaleRow = { ...saleRow }
     for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -25,6 +107,7 @@ async function upsertSaleWithSchemaFallback(saleRow: Record<string, unknown>) {
 async function ensureSalesPostingAccounts(companyId: string) {
     const requiredAccounts = [
         { code: `1000-${companyId.replaceAll('-', '').slice(0, 12)}`, name: 'Cash', account_type: 'ASSET', account_subtype: 'CURRENT_ASSET', normal_balance: 'DEBIT', is_control_account: true },
+        { code: `1105-${companyId.replaceAll('-', '').slice(0, 12)}`, name: 'Receivables', account_type: 'ASSET', account_subtype: 'CURRENT_ASSET', normal_balance: 'DEBIT', is_control_account: true },
         { code: `4000-${companyId.replaceAll('-', '').slice(0, 12)}`, name: 'Sales Revenue', account_type: 'INCOME', account_subtype: 'OPERATING_INCOME', normal_balance: 'CREDIT', is_control_account: false },
     ]
     const { data: existingAccounts, error: lookupError } = await supabaseAdmin!
@@ -133,12 +216,23 @@ export async function POST(request: Request) {
             unit_price: Number(item.unitPrice || 0),
             total: Number(item.total || 0),
         }))
-        const { error: itemError } = await supabaseAdmin.from('sale_items').upsert(itemRows)
+        const { error: deleteItemsError } = await supabaseAdmin.from('sale_items').delete().eq('sale_id', storedSale.id)
+        if (deleteItemsError) throw deleteItemsError
+        const { error: itemError } = await supabaseAdmin.from('sale_items').insert(itemRows)
         if (itemError) throw itemError
 
+        const journalEntries: Array<Record<string, unknown>> = []
+        const journalLines: Array<Record<string, unknown>> = []
+        const rememberJournal = (posted: { entry: Record<string, unknown>; lines: Array<Record<string, unknown>> } | null) => {
+            if (!posted) return
+            journalEntries.push(posted.entry)
+            journalLines.push(...posted.lines)
+        }
+
         let postedBankAccount: { id: string; name: string; balance: number } | null = null
-        if ((paymentStatus === 'PAID' || paymentStatus === 'PART PAYMENT') && amountPaid > 0) {
-            await ensureSalesPostingAccounts(companyId)
+        const outstandingAmount = Math.max(0, totalAmount - amountPaid)
+        if (amountPaid > 0 || outstandingAmount > 0) await ensureSalesPostingAccounts(companyId)
+        if (amountPaid > 0) {
             const { data: postingData, error: postingError } = await supabaseAdmin.rpc('post_accounting_cash_movement', {
                 p_company_id: companyId,
                 p_source_module: 'SALES_PAYMENT',
@@ -153,12 +247,13 @@ export async function POST(request: Request) {
             })
             if (postingError) throw postingError
 
-            const bankAccountId = (postingData as { bank_account_id?: string } | null)?.bank_account_id
-            if (bankAccountId) {
+            const posting = postingData as { bank_account_id?: string; entry_id?: string; posted?: boolean } | null
+            rememberJournal(await loadPostedJournal(posting?.entry_id))
+            if (posting?.bank_account_id) {
                 const { data: bankAccount, error: bankAccountError } = await supabaseAdmin
                     .from('bank_accounts')
                     .select('id,name,balance')
-                    .eq('id', bankAccountId)
+                    .eq('id', posting.bank_account_id)
                     .eq('company_id', companyId)
                     .single()
                 if (bankAccountError) throw bankAccountError
@@ -170,29 +265,25 @@ export async function POST(request: Request) {
             }
         }
 
-        if (paymentStatus !== 'PAID') {
-            const receivableReference = String(sale.id)
-            const outstandingAmount = Number(sale.totalAmount || 0)
-            if (outstandingAmount > 0) {
-                const customerId = customer?.id ?? null
-                const receivableRow = {
-                    company_id: companyId,
-                    contact_id: customerId,
-                    reference: receivableReference,
-                    due_date: sale.date || new Date().toISOString().slice(0, 10),
-                    original_amount: outstandingAmount,
-                    outstanding_amount: outstandingAmount,
-                    status: 'open',
-                }
+        if (outstandingAmount > 0) {
+            rememberJournal(await postReceivableSale(companyId, sale, outstandingAmount))
+            if (customer?.id) {
                 const { error: receivableError } = await supabaseAdmin
                     .from('receivables')
-                    .upsert(receivableRow, { onConflict: 'reference' })
-
+                    .upsert({
+                        company_id: companyId,
+                        contact_id: customer.id,
+                        reference: String(sale.id),
+                        due_date: sale.date || new Date().toISOString().slice(0, 10),
+                        original_amount: totalAmount,
+                        outstanding_amount: outstandingAmount,
+                        status: amountPaid > 0 ? 'partial' : 'open',
+                    }, { onConflict: 'reference' })
                 if (receivableError) throw receivableError
             }
         }
 
-        return NextResponse.json({ success: true, saleId: storedSale.id, bankAccount: postedBankAccount })
+        return NextResponse.json({ success: true, saleId: storedSale.id, bankAccount: postedBankAccount, journalEntries, journalLines })
     } catch (error) {
         return NextResponse.json({ success: false, error: formatErrorMessage(error) }, { status: 400 })
     }

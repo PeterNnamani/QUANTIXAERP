@@ -3,13 +3,11 @@
 import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
+import { buildDefaultReportPeriods } from '@/lib/accounting/sync'
 import { buildManagementAccounts, type ManagementAccounts, type ReportPeriod } from '@/lib/management-accounts'
 import { triggerAppToast } from '@/lib/utils'
 
-const defaultPeriods: ReportPeriod[] = [
-  { label: 'Oct-Mar', startDate: '2025-10-01', endDate: '2026-03-31' },
-  ...['Apr', 'May', 'Jun', 'Jul', 'Aug'].map((label, index) => ({ label, startDate: `2026-${String(index + 4).padStart(2, '0')}-01`, endDate: `2026-${String(index + 4).padStart(2, '0')}-31` })),
-]
+const defaultPeriods: ReportPeriod[] = buildDefaultReportPeriods(new Date())
 const tabs = ['TB', 'SFP', 'P&L', 'NOTES', 'NOTES II', 'PPE'] as const
 type Tab = typeof tabs[number]
 const formatAmount = (value: number, currency = 'NGN') => new Intl.NumberFormat('en-NG', { style: 'currency', currency, currencyDisplay: 'symbol', minimumFractionDigits: 2 }).format(value)

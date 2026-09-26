@@ -7,6 +7,7 @@ import { formatCurrency, formatNumber, triggerAppToast, makeID } from '@/lib/uti
 import { downloadExcel, downloadPdf } from '@/lib/export-utils'
 import { calculateBalanceSheet } from '@/lib/accounting/balance-sheet'
 import { postJournalEntry } from '@/lib/accounting/ledger'
+import { isUuid } from '@/lib/accounting/sync'
 import ManualJournalModal from '@/components/modals/ManualJournalModal'
 import TrialBalanceModal from '@/components/modals/TrialBalanceModal'
 
@@ -330,7 +331,7 @@ export default function LedgerPage() {
             </div>
           </div>
         </div>
-        <ManualJournalModal open={showManualModal} onClose={() => setShowManualModal(false)} onCreate={handleCreateManualJournal} accounts={accounts} />
+        <ManualJournalModal open={showManualModal} onClose={() => setShowManualModal(false)} onCreate={handleCreateManualJournal} accounts={accounts.filter((account) => isUuid(account.id))} />
         <TrialBalanceModal open={showTrialModal} onClose={() => setShowTrialModal(false)} rows={filteredEntries.map((e) => ({ account: e.account, debit: e.debit, credit: e.credit }))} />
       </div>
     </AppLayout>
