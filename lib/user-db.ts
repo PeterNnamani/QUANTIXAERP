@@ -1,6 +1,15 @@
-import { getSupabaseClient } from '@/lib/supabase.browser'
-import { explicitAccessLevels, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
+import { explicitAccessLevels, menuAccessFromLevels, type AccessLevels, type RoleDefinition } from '@/lib/rbac'
 import type { User } from '@/lib/context'
+
+export class SignInError extends Error {
+    code: 'disabled' | 'unavailable'
+
+    constructor(code: 'disabled' | 'unavailable', message: string) {
+        super(message)
+        this.name = 'SignInError'
+        this.code = code
+    }
+}
 
 export interface DatabaseUserRecord {
     id?: string
@@ -28,34 +37,8 @@ export interface DatabaseUserRecord {
     last_login?: string | null
 }
 
-export async function findUserInDatabase(
-    staffIdOrUsername: string,
-    pin: string,
-    roles: RoleDefinition[],
-): Promise<User | null> {
-    const supabase = getSupabaseClient()
-    if (!supabase) return null
-
-    const normalizedId = staffIdOrUsername.trim().toUpperCase()
-    const normalizedPin = pin.trim()
-
-    const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('pin', normalizedPin)
-
-    if (error) {
-        console.warn('Unable to query users table for login', error)
-        return null
-    }
-
-    const match = (data || []).find((row: DatabaseUserRecord) => {
-        const staffId = String(row.staff_id ?? '').trim().toUpperCase()
-        const username = String(row.username ?? '').trim().toUpperCase()
-        return (staffId === normalizedId || username === normalizedId) && String(row.pin ?? '').trim() === normalizedPin
-    })
-
-    if (!match || !match.company_id) return null
+export function userFromDatabaseRecord(match: DatabaseUserRecord, roles: RoleDefinition[]): User | null {
+    if (!match.company_id) return null
 
     const roleId = String(match.role || 'cashier')
     const roleDefinition = roles.find((role) => role.id === roleId)
@@ -81,6 +64,40 @@ export async function findUserInDatabase(
         pin: match.pin ? String(match.pin) : undefined,
         userSettings: match.user_settings || undefined,
     }
+}
+
+export async function findUserInDatabase(
+    staffIdOrUsername: string,
+    pin: string,
+    roles: RoleDefinition[],
+): Promise<User | null> {
+    const normalizedId = staffIdOrUsername.trim().toUpperCase()
+    const normalizedPin = pin.trim()
+    if (!normalizedId || !normalizedPin) return null
+
+    let response: Response
+    try {
+        response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ staffIdOrUsername: normalizedId, pin: normalizedPin }),
+            signal: AbortSignal.timeout(20000),
+        })
+    } catch (error) {
+        console.warn('Unable to reach sign-in', error)
+        throw new SignInError('unavailable', 'Sign-in is unavailable right now.')
+    }
+
+    const result = await response.json().catch(() => ({}))
+    if (response.status === 401) return null
+    if (response.status === 403) {
+        throw new SignInError('disabled', String(result.error || 'This account is disabled.'))
+    }
+    if (!response.ok || !result.success || !result.user) {
+        throw new SignInError('unavailable', String(result.error || 'Sign-in is unavailable right now.'))
+    }
+
+    return userFromDatabaseRecord(result.user as DatabaseUserRecord, roles)
 }
 
 export async function recordUserLogin(user: Pick<User, 'companyId' | 'staffId' | 'username'>) {

@@ -1035,38 +1035,44 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
   // Load from localStorage or sessionStorage on mount
   useEffect(() => {
-    const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
-    let companyId = user?.companyId
+    try {
+      const savedUser = localStorage.getItem(AUTH_KEY) ?? sessionStorage.getItem(AUTH_KEY)
+      let companyId = user?.companyId
 
-    if (savedUser) {
-      try {
-        const parsed = JSON.parse(savedUser)
-        const enriched = enrichStoredUser(parsed)
-        companyId = enriched.companyId || companyId
-        setUser(enriched)
-        // persist back the enriched user so other sessions/readers get visibleMenus
-        const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
-        storage.setItem(AUTH_KEY, JSON.stringify(enriched))
-      } catch (e) {
-        setUser(JSON.parse(savedUser))
+      if (savedUser) {
+        try {
+          const parsed = JSON.parse(savedUser)
+          const enriched = enrichStoredUser(parsed)
+          companyId = enriched.companyId || companyId
+          setUser(enriched)
+          const storage = window.localStorage.getItem(AUTH_KEY) ? localStorage : sessionStorage
+          storage.setItem(AUTH_KEY, JSON.stringify(enriched))
+        } catch (error) {
+          console.error('Unable to restore the saved session', error)
+          localStorage.removeItem(AUTH_KEY)
+          sessionStorage.removeItem(AUTH_KEY)
+        }
       }
+      const savedState = companyId
+        ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
+        : null
+      if (savedState) {
+        const parsedState = JSON.parse(savedState)
+        setState({
+          ...defaultState,
+          ...parsedState,
+          companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
+          expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
+          inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
+          roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
+          staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
+        })
+      }
+    } catch (error) {
+      console.error('Unable to restore saved company records', error)
+    } finally {
+      setIsLoading(false)
     }
-    const savedState = companyId
-      ? localStorage.getItem(`${STORAGE_KEY}:${companyId}`)
-      : null
-    if (savedState) {
-      const parsedState = JSON.parse(savedState)
-      setState({
-        ...defaultState,
-        ...parsedState,
-        companySettings: normalizeCompanySettings(parsedState.companySettings, defaultState.companySettings),
-        expenseCategories: Array.isArray(parsedState.expenseCategories) ? parsedState.expenseCategories : defaultState.expenseCategories,
-        inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
-        roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
-        staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
-      })
-    }
-    setIsLoading(false)
   }, [user?.companyId])
 
   const updateState = (updates: Partial<AppState>, options: { persist?: boolean } = {}) => {
@@ -1609,14 +1615,13 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
   const login = (userData: User, remember: boolean) => {
     const enriched = enrichStoredUser(userData)
-    setUser(enriched)
+    const storage = remember ? localStorage : sessionStorage
+    const otherStorage = remember ? sessionStorage : localStorage
+    otherStorage.removeItem(AUTH_KEY)
+    storage.setItem(AUTH_KEY, JSON.stringify(enriched))
     localStorage.setItem(ONBOARDING_COMPLETED_KEY, 'true')
     localStorage.setItem(LOGIN_NOTIFICATION_KEY, `${Date.now()}-${Math.random().toString(36).slice(2)}`)
-    localStorage.removeItem(AUTH_KEY)
-    sessionStorage.removeItem(AUTH_KEY)
-
-    const storage = remember ? localStorage : sessionStorage
-    storage.setItem(AUTH_KEY, JSON.stringify(enriched))
+    setUser(enriched)
     if (supabase && enriched.companyId) {
       void supabase.from('audit_logs').insert({
         company_id: enriched.companyId,
