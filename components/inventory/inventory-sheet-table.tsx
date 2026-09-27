@@ -4,6 +4,7 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { formatCurrency, formatNumber } from '@/lib/utils'
 import type { AuditLog, InventoryItem, Purchase, Sale } from '@/lib/context'
+import { computeInventoryStats, getStockStatus, reorderThreshold, stockOnHand } from '@/lib/inventory-stats'
 
 export type InventorySheet = 'product-master' | 'stock-movement' | 'stock-count' | 'inventory-dashboard'
 
@@ -44,18 +45,10 @@ export default function InventorySheetTable({ sheet, onSheetChange, inventory, p
         rowId: item.sku || `SKU-${index + 1}`,
         brand: item.brand || '-',
         packSize: item.packSize || '-',
-        reorderLevel: item.reorderLevel ?? Math.max(5, Math.floor((item.closing || 0) * 0.2)),
-        reorderQuantity: item.reorderQuantity ?? Math.max(0, (item.reorderLevel ?? 5) - item.closing),
+        reorderLevel: reorderThreshold(item),
+        reorderQuantity: item.reorderQuantity || Math.max(0, reorderThreshold(item) - stockOnHand(item)),
         active: item.active ?? true,
     }))
-
-    const getStockStatus = (item: (typeof products)[number]) => {
-        if (item.closing <= 0) return 'Out of Stock'
-        if ((item.damagedExpired || 0) > 0) return 'Damaged/Expired'
-        if (item.maximumStockLevel && item.closing > item.maximumStockLevel) return 'Overstock'
-        if (item.closing <= item.reorderLevel) return 'Low Stock'
-        return 'In Stock'
-    }
 
     if (sheet === 'product-master') {
         const rows = products.filter((item) => matches([item.rowId, item.product, item.brand, item.dept, getStockStatus(item)]))
@@ -68,7 +61,7 @@ export default function InventorySheetTable({ sheet, onSheetChange, inventory, p
             setSelectedSkus((current) => current.filter((sku) => !skus.includes(sku)))
         }
         return <SheetFrame title="Product Master" count={rows.length} sheet={sheet} onSheetChange={onSheetChange} headers={inventorySheetHeaders['product-master']} actions={onDeleteInventoryItems ? <div className="inventory-selection-actions"><label><input type="checkbox" checked={allVisibleSelected} onChange={(event) => setSelectedSkus(event.target.checked ? Array.from(new Set([...selectedSkus, ...visibleSkus])) : selectedSkus.filter((sku) => !visibleSkus.includes(sku)))} /> Select all</label><button type="button" className="inventory-btn secondary" disabled={selectedVisibleCount === 0} onClick={() => deleteRows(visibleSkus.filter((sku) => selectedSkus.includes(sku)))}>Delete selected</button><button type="button" className="inventory-btn danger" disabled={products.length === 0} onClick={() => deleteRows(products.map((item) => item.rowId))}>Delete all</button></div> : undefined}>
-            {rows.map((item) => <tr key={item.rowId}><td><input type="checkbox" aria-label={`Select ${item.product}`} checked={selectedSkus.includes(item.rowId)} onChange={(event) => setSelectedSkus((current) => event.target.checked ? [...current, item.rowId] : current.filter((sku) => sku !== item.rowId))} /> {item.rowId}</td><td>{item.product}</td><td>{item.brand}</td><td>{item.dept || '-'}</td><td>{item.packSize}</td><td>{formatCurrency(item.unitCost)}</td><td>{formatCurrency(item.sellingPrice ?? item.unitCost * 1.35)}</td><td>{item.reorderLevel}</td><td>{item.reorderQuantity}</td><td><StockStatus value={getStockStatus(item)} /></td></tr>)}
+            {rows.map((item) => <tr key={item.rowId}><td><input type="checkbox" aria-label={`Select ${item.product}`} checked={selectedSkus.includes(item.rowId)} onChange={(event) => setSelectedSkus((current) => event.target.checked ? [...current, item.rowId] : current.filter((sku) => sku !== item.rowId))} /> {item.rowId}</td><td>{item.product}</td><td>{item.brand}</td><td>{item.dept || '-'}</td><td>{item.packSize}</td><td>{formatCurrency(item.unitCost)}</td><td>{formatCurrency(item.sellingPrice ?? item.unitCost)}</td><td>{item.reorderLevel}</td><td>{item.reorderQuantity}</td><td><StockStatus value={getStockStatus(item)} /></td></tr>)}
         </SheetFrame>
     }
 
@@ -88,12 +81,9 @@ export default function InventorySheetTable({ sheet, onSheetChange, inventory, p
         </SheetFrame>
     }
 
-    const totalStockValue = products.reduce((sum, item) => sum + item.closing * item.unitCost, 0)
-    const lowStock = products.filter((item) => item.closing > 0 && item.closing <= item.reorderLevel).length
-    const outOfStock = products.filter((item) => item.closing <= 0).length
-    const damaged = products.reduce((sum, item) => sum + (item.damagedExpired || 0), 0)
+    const stats = computeInventoryStats(inventory)
     const dashboardRows = [
-        ['Total SKUs', formatNumber(products.length)], ['Total Stock Value', formatCurrency(totalStockValue)], ['Low Stock Items', formatNumber(lowStock)], ['Out-of-Stock Items', formatNumber(outOfStock)], ['Overstock Items', '0'], ['Damaged/Expired Stock', formatNumber(damaged)], ['Stock Variance', formatCurrency(0)], ['Fast-Moving Products', formatNumber(products.filter((item) => item.sold > 0).length)], ['Slow-Moving Products', formatNumber(products.filter((item) => item.sold > 0 && item.sold <= 5).length)], ['Dead Stock', formatNumber(products.filter((item) => item.closing > 0 && item.sold === 0).length)],
+        ['Total SKUs', formatNumber(stats.totalProducts)], ['Total Stock Value', formatCurrency(stats.inventoryValue)], ['Low Stock Items', formatNumber(stats.lowStock)], ['Out-of-Stock Items', formatNumber(stats.outOfStock)], ['Overstock Items', formatNumber(stats.overstock)], ['Expiring Within 30 Days', formatNumber(stats.expiringSoon)], ['Expired Items', formatNumber(stats.expired)], ['Damaged/Expired Stock', formatNumber(stats.damagedUnits)], ['Stock Variance', formatCurrency(0)], ['Fast-Moving Products', formatNumber(products.filter((item) => item.sold > 0).length)], ['Slow-Moving Products', formatNumber(products.filter((item) => item.sold > 0 && item.sold <= 5).length)], ['Dead Stock', formatNumber(products.filter((item) => item.closing > 0 && item.sold === 0).length)],
     ]
     return <SheetFrame title="Inventory Dashboard" count={dashboardRows.length} sheet={sheet} onSheetChange={onSheetChange} headers={inventorySheetHeaders['inventory-dashboard']}>
         {dashboardRows.filter((row) => matches(row)).map(([label, value]) => <tr key={label}><td>{label}</td><td><strong>{value}</strong></td></tr>)}

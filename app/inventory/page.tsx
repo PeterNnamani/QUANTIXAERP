@@ -1,15 +1,42 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import BulkImport from '@/components/bulk-import'
 import { useAccounting } from '@/lib/context'
 import { formatCurrency, formatNumber, triggerAppToast } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
+import { computeInventoryStats, EXPIRY_WARNING_DAYS, getStockStatus, reorderThreshold, stockOnHand, valuationCost } from '@/lib/inventory-stats'
 import InventorySheetTable, { inventorySheetHeaders, type InventorySheet } from '@/components/inventory/inventory-sheet-table'
 
 export default function InventoryPage() {
-  const { state, updateState, deleteInventoryItems, addAuditLog } = useAccounting()
+  const { state, updateState, deleteInventoryItems, refreshInventory, addAuditLog } = useAccounting()
+  const [syncState, setSyncState] = useState<{ status: 'idle' | 'syncing' | 'synced' | 'error'; at?: Date; message?: string }>({ status: 'idle' })
+  const syncing = useRef(false)
+  const refreshRef = useRef(refreshInventory)
+  refreshRef.current = refreshInventory
+
+  const syncFromDatabase = useCallback(async () => {
+    if (syncing.current) return
+    syncing.current = true
+    setSyncState((current) => ({ ...current, status: 'syncing' }))
+    try {
+      await refreshRef.current()
+      setSyncState({ status: 'synced', at: new Date() })
+    } catch (error) {
+      const message = error && typeof error === 'object' && 'message' in error ? String((error as { message: unknown }).message) : 'Unable to reach the database.'
+      setSyncState((current) => ({ ...current, status: 'error', message }))
+    } finally {
+      syncing.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    void syncFromDatabase()
+    const onFocus = () => { void syncFromDatabase() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [syncFromDatabase])
   const [search, setSearch] = useState('')
   const [selectedWarehouse, setSelectedWarehouse] = useState('Main Warehouse')
   const [selectedCategory, setSelectedCategory] = useState('All Categories')
@@ -18,24 +45,32 @@ export default function InventoryPage() {
   const [showFilters, setShowFilters] = useState(false)
 
   const inventoryRows = useMemo(() => {
-    return state.inventory.map((item, index) => ({
-      sku: item.sku || `SKU-${index + 1}`,
-      product: item.product,
-      brand: item.brand || '-',
-      category: item.dept || 'Uncategorized',
-      packSize: item.packSize || '-',
-      unitCost: item.unitCost,
-      sellingPrice: item.sellingPrice ?? item.unitCost * 1.35,
-      available: item.closing,
-      stockValue: item.closing * item.unitCost,
-      expiryDate: item.expiryDate || '',
-      damagedExpired: item.damagedExpired || 0,
-      reorderLevel: Math.max(5, Math.floor((item.closing || 0) * 0.2)),
-      reorderQuantity: Math.max(0, Math.floor(Math.max(5, Math.floor((item.closing || 0) * 0.2)) - (item.closing || 0))),
-      status: item.closing <= 0 ? 'Out of Stock' : item.closing <= 10 ? 'Low Stock' : 'In Stock',
-      warehouse: 'Main Warehouse',
-    }))
+    const today = new Date()
+    return state.inventory.map((item, index) => {
+      const available = stockOnHand(item)
+      const reorderLevel = reorderThreshold(item)
+      return {
+        sku: item.sku || `SKU-${index + 1}`,
+        product: item.product,
+        brand: item.brand || '-',
+        category: item.dept || 'Uncategorized',
+        packSize: item.packSize || '-',
+        unitCost: item.unitCost,
+        averageCost: valuationCost(item),
+        sellingPrice: item.sellingPrice ?? item.unitCost,
+        available,
+        stockValue: available * valuationCost(item),
+        expiryDate: item.expiryDate || '',
+        damagedExpired: item.damagedExpired || 0,
+        reorderLevel,
+        reorderQuantity: item.reorderQuantity || Math.max(0, reorderLevel - available),
+        status: getStockStatus(item, today),
+        warehouse: 'Main Warehouse',
+      }
+    })
   }, [state.inventory])
+
+  const stats = useMemo(() => computeInventoryStats(state.inventory), [state.inventory])
 
   const filteredRows = useMemo(() => {
     const query = search.toLowerCase()
@@ -97,13 +132,21 @@ export default function InventoryPage() {
   }
 
   const summaryCards = [
-    { label: 'Total Products', value: formatNumber(inventoryRows.length), tone: 'info' },
-    { label: 'Items in Stock', value: formatNumber(inventoryRows.reduce((sum, row) => sum + row.available, 0)), tone: 'info' },
-    { label: 'Inventory Value', value: formatCurrency(inventoryRows.reduce((sum, row) => sum + row.stockValue, 0)), tone: 'info' },
-    { label: 'Low Stock Items', value: formatNumber(inventoryRows.filter((row) => row.status === 'Low Stock').length), tone: 'warning' },
-    { label: 'Out of Stock', value: formatNumber(inventoryRows.filter((row) => row.status === 'Out of Stock').length), tone: 'critical' },
-    { label: 'Expiring Soon', value: formatNumber(inventoryRows.filter((row) => row.status === 'Expired').length), tone: 'warning' },
+    { label: 'Total Products', value: formatNumber(stats.totalProducts), note: 'Active SKUs', tone: 'info' },
+    { label: 'Items in Stock', value: formatNumber(stats.unitsInStock), note: 'Units on hand', tone: 'info' },
+    { label: 'Inventory Value', value: formatCurrency(stats.inventoryValue), note: 'At average cost', tone: 'info' },
+    { label: 'Low Stock Items', value: formatNumber(stats.lowStock), note: 'At or below reorder level', tone: 'warning' },
+    { label: 'Out of Stock', value: formatNumber(stats.outOfStock), note: 'No units on hand', tone: 'critical' },
+    { label: 'Expiring Soon', value: formatNumber(stats.expiringSoon), note: stats.expired > 0 ? `Within ${EXPIRY_WARNING_DAYS} days · ${formatNumber(stats.expired)} expired` : `Within ${EXPIRY_WARNING_DAYS} days`, tone: stats.expired > 0 ? 'critical' : 'warning' },
   ]
+
+  const syncLabel = syncState.status === 'syncing'
+    ? 'Syncing with database…'
+    : syncState.status === 'error'
+      ? `Showing saved data. Database sync failed: ${syncState.message}`
+      : syncState.at
+        ? `Synced with database at ${syncState.at.toLocaleTimeString()}`
+        : ''
 
   return (
     <AppLayout>
@@ -129,9 +172,16 @@ export default function InventoryPage() {
             <div className={`inventory-summary-card ${card.tone}`} key={card.label}>
               <div className="inventory-summary-label">{card.label}</div>
               <div className="inventory-summary-value">{card.value}</div>
+              <div className="inventory-summary-note">{card.note}</div>
             </div>
           ))}
         </div>
+        {syncLabel && (
+          <div className={`inventory-sync-status ${syncState.status}`}>
+            <span>{syncLabel}</span>
+            <button type="button" className="inventory-btn secondary allow-readonly" disabled={syncState.status === 'syncing'} onClick={() => void syncFromDatabase()}>Refresh</button>
+          </div>
+        )}
 
         {showFilters && (
           <div className="inventory-card">
@@ -179,7 +229,7 @@ export default function InventoryPage() {
                   <option>Out of Stock</option>
                   <option>Expired</option>
                   <option>Damaged</option>
-                  <option>Reserved</option>
+                  <option>Overstock</option>
                 </select>
               </label>
               <label>

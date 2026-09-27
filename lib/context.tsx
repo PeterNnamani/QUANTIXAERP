@@ -415,6 +415,7 @@ export interface AccountingContextType {
   updateState: (updates: Partial<AppState>, options?: { persist?: boolean }) => void
   resetCompanyBooks: () => void
   deleteInventoryItems: (skus: string[]) => Promise<void>
+  refreshInventory: () => Promise<void>
   login: (userData: User, remember: boolean) => void
   logout: () => void
   addAuditLog: (action: string, type: string, reference: string, details: string) => void
@@ -664,6 +665,53 @@ function normalizeRemoteInventory(data: any[]): AppState['inventory'] {
   }))
 }
 
+const PRODUCT_PAGE_SIZE = 1000
+
+async function fetchCompanyProducts(companyId: string): Promise<{ data: any[] | null; error: any }> {
+  if (!supabase) return { data: null, error: new Error('Supabase is not configured.') }
+  const rows: any[] = []
+  for (let from = 0; ; from += PRODUCT_PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .eq('company_id', companyId)
+      .is('deleted_at', null)
+      .order('updated_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, from + PRODUCT_PAGE_SIZE - 1)
+    if (error) return { data: null, error }
+    rows.push(...(data || []))
+    if (!data || data.length < PRODUCT_PAGE_SIZE) return { data: rows, error: null }
+  }
+}
+
+// Cached copies in other browsers must not bring back products that were removed from the database.
+async function fetchDeletedProductSkus(companyId: string): Promise<Set<string>> {
+  if (!supabase) return new Set()
+  const [{ data: softDeletedProducts }, { data: productDeleteEvents }] = await Promise.all([
+    supabase.from('products').select('sku').eq('company_id', companyId).not('deleted_at', 'is', null),
+    supabase.from('audit_logs').select('metadata').eq('company_id', companyId).eq('entity', 'PRODUCTS').eq('action', 'DELETE').order('event_time', { ascending: false }).limit(1000),
+  ])
+  return new Set([
+    ...(softDeletedProducts || []).map((row: any) => row.sku),
+    ...(productDeleteEvents || []).map((row: any) => row.metadata?.old?.sku),
+  ].filter(Boolean))
+}
+
+// The database is authoritative for stock, cost, and reorder fields; local-only movement counters are kept.
+function mergeRemoteInventory(remote: InventoryItem[], local: InventoryItem[], failed: boolean, deletedSkus: Set<string>): InventoryItem[] {
+  if (failed) return local
+  const keyOf = (item: InventoryItem) => item.sku || item.product
+  const localByKey = new Map(local.map((item) => [keyOf(item), item]))
+  const remoteKeys = new Set(remote.map(keyOf))
+  const localOnly = local.filter((item) => !remoteKeys.has(keyOf(item)) && !deletedSkus.has(item.sku || ''))
+  const merged = remote.map((item) => {
+    const cached = localByKey.get(keyOf(item))
+    return cached ? { ...cached, ...item, openQty: cached.openQty, purchased: cached.purchased, sold: cached.sold } : item
+  })
+  return [...localOnly, ...merged]
+}
+
 function normalizeInventorySkus(inventory: InventoryItem[]): InventoryItem[] {
   const usedSkus = inventory.map((item) => item.sku).filter((sku): sku is string => Boolean(sku))
   return inventory.map((item) => {
@@ -814,7 +862,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           supabase.from('purchases').select('*, contacts(name), purchase_items(*)').eq('company_id', companyId).order('purchase_date', { ascending: false }).limit(200),
           supabase.from('expenses').select('*, bank_accounts(name)').eq('company_id', companyId).order('expense_date', { ascending: false }).limit(200),
           supabase.from('expense_categories').select('name').eq('company_id', companyId).order('name'),
-          supabase.from('products').select('*').eq('company_id', companyId).is('deleted_at', null).order('updated_at', { ascending: false }).limit(200),
+          fetchCompanyProducts(companyId),
           supabase.from('prepayments').select('*, prepayment_schedules(*)').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('contacts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('bank_accounts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(100),
@@ -879,15 +927,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         const remoteExpenses = expensesData && expensesData.length > 0 ? normalizeRemoteExpenses(expensesData) : []
         const remoteExpenseCategories = (categoriesData || []).map((item: any) => item.name).filter(Boolean)
         const remoteInventory = inventoryData && inventoryData.length > 0 ? normalizeRemoteInventory(inventoryData) : []
-        // Cached copies in other browsers must not bring back products that were removed from the database.
-        const [{ data: softDeletedProducts }, { data: productDeleteEvents }] = await Promise.all([
-          supabase.from('products').select('sku').eq('company_id', companyId).not('deleted_at', 'is', null),
-          supabase.from('audit_logs').select('metadata').eq('company_id', companyId).eq('entity', 'PRODUCTS').eq('action', 'DELETE').order('event_time', { ascending: false }).limit(1000),
-        ])
-        const deletedSkus = new Set([
-          ...(softDeletedProducts || []).map((row: any) => row.sku),
-          ...(productDeleteEvents || []).map((row: any) => row.metadata?.old?.sku),
-        ].filter(Boolean))
+        const deletedSkus = await fetchDeletedProductSkus(companyId)
         const remoteReceivables = mergeReceivablesFromSales(remoteSales, normalizeRemoteReceivables(receivablesData || []))
         const remotePrepayments = prepaymentsErr && prepaymentsErr.code === 'PGRST205'
           ? []
@@ -908,7 +948,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           purchases: mergeRemoteRecords(remotePurchases, prev.purchases, Boolean(purchasesErr)),
           expenses: mergeRemoteRecords(remoteExpenses, prev.expenses, Boolean(expensesErr)),
           expenseCategories: categoriesErr ? prev.expenseCategories : remoteExpenseCategories,
-          inventory: mergeRemoteRecords(remoteInventory, prev.inventory.filter((item) => !deletedSkus.has(item.sku || '')), Boolean(inventoryErr), 'local', (item) => item.sku || item.product),
+          inventory: mergeRemoteInventory(remoteInventory, prev.inventory, Boolean(inventoryErr), deletedSkus),
           prepayments: prepaymentsErr && prepaymentsErr.code !== 'PGRST205' ? prev.prepayments : mergeRemoteRecords(remotePrepayments, prev.prepayments, false),
           supplierList: contactsErr ? prev.supplierList : supplierList,
           customerList: contactsErr ? prev.customerList : customerList,
@@ -1618,6 +1658,19 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     })
   }
 
+  const refreshInventory = async () => {
+    const companyId = user?.companyId
+    if (!supabase || !companyId) return
+    const [{ data, error }, deletedSkus] = await Promise.all([fetchCompanyProducts(companyId), fetchDeletedProductSkus(companyId)])
+    if (error) throw error
+    const remote = normalizeRemoteInventory(data || [])
+    setState((prev) => {
+      const newState = { ...prev, inventory: mergeRemoteInventory(remote, prev.inventory, false, deletedSkus) }
+      localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(newState))
+      return newState
+    })
+  }
+
   const deleteInventoryItems = async (skus: string[]) => {
     const uniqueSkus = Array.from(new Set(skus.filter(Boolean)))
     if (uniqueSkus.length === 0) return
@@ -1800,6 +1853,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     updateState,
     resetCompanyBooks,
     deleteInventoryItems,
+    refreshInventory,
     login,
     logout,
     addAuditLog,
