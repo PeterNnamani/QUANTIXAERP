@@ -879,8 +879,15 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         const remoteExpenses = expensesData && expensesData.length > 0 ? normalizeRemoteExpenses(expensesData) : []
         const remoteExpenseCategories = (categoriesData || []).map((item: any) => item.name).filter(Boolean)
         const remoteInventory = inventoryData && inventoryData.length > 0 ? normalizeRemoteInventory(inventoryData) : []
-        const { data: deletedProductsData } = await supabase.from('products').select('sku').eq('company_id', companyId).not('deleted_at', 'is', null)
-        const deletedSkus = new Set((deletedProductsData || []).map((row: any) => row.sku).filter(Boolean))
+        // Cached copies in other browsers must not bring back products that were removed from the database.
+        const [{ data: softDeletedProducts }, { data: productDeleteEvents }] = await Promise.all([
+          supabase.from('products').select('sku').eq('company_id', companyId).not('deleted_at', 'is', null),
+          supabase.from('audit_logs').select('metadata').eq('company_id', companyId).eq('entity', 'PRODUCTS').eq('action', 'DELETE').order('event_time', { ascending: false }).limit(1000),
+        ])
+        const deletedSkus = new Set([
+          ...(softDeletedProducts || []).map((row: any) => row.sku),
+          ...(productDeleteEvents || []).map((row: any) => row.metadata?.old?.sku),
+        ].filter(Boolean))
         const remoteReceivables = mergeReceivablesFromSales(remoteSales, normalizeRemoteReceivables(receivablesData || []))
         const remotePrepayments = prepaymentsErr && prepaymentsErr.code === 'PGRST205'
           ? []
@@ -1616,24 +1623,43 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     if (uniqueSkus.length === 0) return
 
     const companyId = user?.companyId
-    const now = new Date().toISOString()
-    const purgeAfter = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
     if (supabase && companyId) {
-      const { error } = await supabase
-        .from('products')
-        .update({ deleted_at: now, purge_after: purgeAfter, updated_at: now })
-        .eq('company_id', companyId)
-        .in('sku', uniqueSkus)
-      if (error) throw error
+      const { data: rows, error: lookupError } = await supabase.from('products').select('id').eq('company_id', companyId).in('sku', uniqueSkus)
+      if (lookupError) throw lookupError
+      const productIds = (rows || []).map((row: { id: string }) => row.id)
+      if (productIds.length > 0) {
+        // inventory_movements and stock_counts reference products with ON DELETE RESTRICT; sales_invoice_lines has no delete action.
+        const dependents = await Promise.all([
+          supabase.from('inventory_movements').delete().in('product_id', productIds),
+          supabase.from('stock_counts').delete().in('product_id', productIds),
+          supabase.from('sales_invoice_lines').update({ product_id: null }).in('product_id', productIds),
+        ])
+        const dependentError = dependents.map((result) => result.error).find((error) => error && error.code !== 'PGRST205' && error.code !== '42P01')
+        if (dependentError) throw dependentError
+        const { error: deleteError } = await supabase.from('products').delete().eq('company_id', companyId).in('id', productIds)
+        if (deleteError) throw deleteError
+      }
     }
 
     const deleted = new Set(uniqueSkus)
+    const withoutDeleted = (inventory: InventoryItem[]) => inventory.filter((item) => !deleted.has(item.sku || ''))
     // Update local state only; re-upserting the remaining inventory here is unnecessary and can fail on unsynced rows.
     setState((prev) => {
-      const newState = { ...prev, inventory: prev.inventory.filter((item) => !deleted.has(item.sku || '')) }
+      const newState = { ...prev, inventory: withoutDeleted(prev.inventory) }
       if (companyId) localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(newState))
       return newState
     })
+    const storedKeys = [companyId ? `${STORAGE_KEY}:${companyId}` : '', STORAGE_KEY].filter(Boolean)
+    for (const storage of [localStorage, sessionStorage]) {
+      for (const key of storedKeys) {
+        try {
+          const saved = JSON.parse(storage.getItem(key) || 'null')
+          if (Array.isArray(saved?.inventory)) storage.setItem(key, JSON.stringify({ ...saved, inventory: withoutDeleted(saved.inventory) }))
+        } catch {
+          // Leave unreadable entries alone; the restore path already ignores them.
+        }
+      }
+    }
   }
 
   const login = (userData: User, remember: boolean) => {

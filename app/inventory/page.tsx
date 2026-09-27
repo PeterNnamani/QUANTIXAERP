@@ -219,7 +219,8 @@ export default function InventoryPage() {
               addAuditLog('DELETE', 'INVENTORY', skus.join(', '), `${skus.length} inventory item${skus.length === 1 ? '' : 's'} deleted.`)
             } catch (error) {
               console.error('Unable to delete inventory items', error)
-              triggerAppToast('Delete failed', 'Inventory could not be deleted from the database.')
+              const reason = error && typeof error === 'object' && 'message' in error ? String((error as { message: unknown }).message) : ''
+              triggerAppToast('Delete failed', `Inventory could not be deleted from the database.${reason ? ` ${reason}` : ''}`)
             }
           }}
         />

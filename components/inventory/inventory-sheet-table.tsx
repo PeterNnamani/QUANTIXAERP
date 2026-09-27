@@ -63,7 +63,7 @@ export default function InventorySheetTable({ sheet, onSheetChange, inventory, p
         const selectedVisibleCount = visibleSkus.filter((sku) => selectedSkus.includes(sku)).length
         const allVisibleSelected = visibleSkus.length > 0 && selectedVisibleCount === visibleSkus.length
         const deleteRows = async (skus: string[]) => {
-            if (!onDeleteInventoryItems || skus.length === 0 || !window.confirm(`Delete ${skus.length} inventory item${skus.length === 1 ? '' : 's'}?`)) return
+            if (!onDeleteInventoryItems || skus.length === 0 || !window.confirm(`Permanently delete ${skus.length} inventory item${skus.length === 1 ? '' : 's'}? Their stock movements and stock counts are removed too. This cannot be undone.`)) return
             await onDeleteInventoryItems(skus)
             setSelectedSkus((current) => current.filter((sku) => !skus.includes(sku)))
         }
