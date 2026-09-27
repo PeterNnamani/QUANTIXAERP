@@ -879,6 +879,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         const remoteExpenses = expensesData && expensesData.length > 0 ? normalizeRemoteExpenses(expensesData) : []
         const remoteExpenseCategories = (categoriesData || []).map((item: any) => item.name).filter(Boolean)
         const remoteInventory = inventoryData && inventoryData.length > 0 ? normalizeRemoteInventory(inventoryData) : []
+        const { data: deletedProductsData } = await supabase.from('products').select('sku').eq('company_id', companyId).not('deleted_at', 'is', null)
+        const deletedSkus = new Set((deletedProductsData || []).map((row: any) => row.sku).filter(Boolean))
         const remoteReceivables = mergeReceivablesFromSales(remoteSales, normalizeRemoteReceivables(receivablesData || []))
         const remotePrepayments = prepaymentsErr && prepaymentsErr.code === 'PGRST205'
           ? []
@@ -899,7 +901,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           purchases: mergeRemoteRecords(remotePurchases, prev.purchases, Boolean(purchasesErr)),
           expenses: mergeRemoteRecords(remoteExpenses, prev.expenses, Boolean(expensesErr)),
           expenseCategories: categoriesErr ? prev.expenseCategories : remoteExpenseCategories,
-          inventory: mergeRemoteRecords(remoteInventory, prev.inventory, Boolean(inventoryErr), 'local', (item) => item.sku || item.product),
+          inventory: mergeRemoteRecords(remoteInventory, prev.inventory.filter((item) => !deletedSkus.has(item.sku || '')), Boolean(inventoryErr), 'local', (item) => item.sku || item.product),
           prepayments: prepaymentsErr && prepaymentsErr.code !== 'PGRST205' ? prev.prepayments : mergeRemoteRecords(remotePrepayments, prev.prepayments, false),
           supplierList: contactsErr ? prev.supplierList : supplierList,
           customerList: contactsErr ? prev.customerList : customerList,
@@ -1613,18 +1615,25 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     const uniqueSkus = Array.from(new Set(skus.filter(Boolean)))
     if (uniqueSkus.length === 0) return
 
+    const companyId = user?.companyId
+    const now = new Date().toISOString()
     const purgeAfter = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
-    if (supabase && user?.companyId) {
+    if (supabase && companyId) {
       const { error } = await supabase
         .from('products')
-        .update({ deleted_at: new Date().toISOString(), purge_after: purgeAfter, status: 'inactive', updated_at: new Date().toISOString() })
-        .eq('company_id', user.companyId)
+        .update({ deleted_at: now, purge_after: purgeAfter, updated_at: now })
+        .eq('company_id', companyId)
         .in('sku', uniqueSkus)
       if (error) throw error
     }
 
     const deleted = new Set(uniqueSkus)
-    updateState({ inventory: state.inventory.filter((item) => !deleted.has(item.sku || '')) })
+    // Update local state only; re-upserting the remaining inventory here is unnecessary and can fail on unsynced rows.
+    setState((prev) => {
+      const newState = { ...prev, inventory: prev.inventory.filter((item) => !deleted.has(item.sku || '')) }
+      if (companyId) localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(newState))
+      return newState
+    })
   }
 
   const login = (userData: User, remember: boolean) => {
