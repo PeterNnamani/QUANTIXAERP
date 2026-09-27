@@ -26,6 +26,14 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M2 10h20" />
     </svg>
   ),
+  costOfSales: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 3v18h18" />
+      <path d="m7 15 4-4 3 3 5-6" />
+      <path d="M19 8h-3" />
+      <path d="M19 8v3" />
+    </svg>
+  ),
   expenses: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M6 7h12" />
