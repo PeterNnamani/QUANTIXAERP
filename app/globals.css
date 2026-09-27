@@ -6783,6 +6783,26 @@ html[data-theme='dark'] .sidebar-body {
   margin-top: 6px;
 }
 
+.inventory-summary-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text3);
+}
+
+.inventory-sync-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px 0 16px;
+  font-size: 12px;
+  color: var(--text3);
+}
+
+.inventory-sync-status.error {
+  color: var(--red);
+}
+
 .inventory-card,
 .product-manager-card {
   border: 1px solid var(--border);
