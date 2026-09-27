@@ -22,7 +22,7 @@ const sidebarSections = [
 ]
 
 export default function SettingsPage() {
-  const { state, updateState, resetCompanyBooks, addAuditLog, user, logout } = useAccounting()
+  const { state, updateState, resetCompanyBooks, addAuditLog, saveBankAccount, user, logout } = useAccounting()
   const defaultUserSettings: UserSettings = {
     dateFormat: 'DD/MM/YYYY', timezone: 'Africa/Lagos',
     notifications: { email: true, push: true, whatsapp: true },
@@ -63,6 +63,7 @@ export default function SettingsPage() {
   const [editingBankId, setEditingBankId] = useState<string | null>(null)
   const [bankDraft, setBankDraft] = useState({ institution: '', accountName: '', accountNumber: '', accountType: 'Current', currency: 'NGN', branch: '', openingBalance: 0, openingBalanceDate: '', balance: 0, status: 'active' })
   const [bankEditStatus, setBankEditStatus] = useState('')
+  const [bankSaving, setBankSaving] = useState(false)
   const [settingsNotice, setSettingsNotice] = useState<{ tone: 'error' | 'success'; message: string } | null>(null)
   const [wipeConfirm, setWipeConfirm] = useState('')
   const [closeConfirm, setCloseConfirm] = useState('')
@@ -116,7 +117,12 @@ export default function SettingsPage() {
         openingBalanceDate: openingDateDrafts[account.id] ?? account.openingBalanceDate ?? null,
       }
     })
-    updateState({ chartOfAccounts: mergedChartOfAccounts })
+    const openingBalances = Object.fromEntries(mergedChartOfAccounts
+      .filter((account) => ['ASSET', 'LIABILITY', 'EQUITY'].includes(account.accountType))
+      .map((account) => [account.name.trim().toLowerCase(), { amount: Number(account.openingBalance || 0), date: account.openingBalanceDate || null }]))
+    updateState({ chartOfAccounts: mergedChartOfAccounts, companySettings: { ...companySettings, openingBalances } })
+    setOpeningBalanceDrafts({})
+    setOpeningDateDrafts({})
     addAuditLog('UPDATE', 'ACCOUNTING', 'OPENING_BALANCES', 'Financial-position opening balances updated.')
     setSettingsNotice({ tone: 'success', message: 'Opening balances saved.' })
   }
@@ -392,11 +398,16 @@ export default function SettingsPage() {
     }
   }
 
-  const handleCreateBank = () => {
+  const handleCreateBank = async () => {
     const institution = newBankName.trim()
     const accountName = newBankAccountName.trim()
     if (!institution || !accountName) {
       setBankCreationStatus('Enter both a bank name and account name.')
+      return
+    }
+    const openingBalance = Number(newBankOpeningBalance)
+    if (!Number.isFinite(openingBalance) || openingBalance < 0) {
+      setBankCreationStatus('Opening balance must be zero or more.')
       return
     }
     const accountKey = `${institution} — ${accountName}`
@@ -407,14 +418,22 @@ export default function SettingsPage() {
     const account: BankAccount = {
       id: crypto.randomUUID(), name: accountKey, institution,
       accountNumber: newBankAccountNumber.trim(), accountType: newBankAccountType,
-      currency: newBankCurrency, branch: '', openingBalance: newBankOpeningBalance,
-      openingBalanceDate: newBankOpeningDate, balance: newBankOpeningBalance, status: 'active',
+      currency: newBankCurrency, branch: '', openingBalance,
+      openingBalanceDate: newBankOpeningDate, balance: openingBalance, status: 'active',
     }
-    updateState({ banks: { ...state.banks, [account.name]: account.balance }, bankAccounts: [...state.bankAccounts, account] })
-    addAuditLog('CREATE', 'BANK', accountKey, `Created ${newBankAccountType.toLowerCase()} bank account.`)
-    setNewBankName(''); setNewBankAccountName(''); setNewBankAccountNumber(''); setNewBankAccountType('Current')
-    setNewBankCurrency('NGN'); setNewBankOpeningBalance(0); setNewBankOpeningDate(new Date().toISOString().slice(0, 10))
-    setBankCreationStatus(`${accountKey} was created and is now available in Bank Balances.`)
+    setBankSaving(true)
+    setBankCreationStatus('')
+    try {
+      await saveBankAccount(account)
+      addAuditLog('CREATE', 'BANK', accountKey, `Created ${newBankAccountType.toLowerCase()} bank account with opening balance ${formatCurrency(openingBalance)}.`)
+      setNewBankName(''); setNewBankAccountName(''); setNewBankAccountNumber(''); setNewBankAccountType('Current')
+      setNewBankCurrency('NGN'); setNewBankOpeningBalance(0); setNewBankOpeningDate(new Date().toISOString().slice(0, 10))
+      setBankCreationStatus(`${accountKey} was created with a balance of ${formatCurrency(openingBalance)} and is now available in Bank Balances.`)
+    } catch (error) {
+      setBankCreationStatus(error instanceof Error ? error.message : 'Unable to create the bank account.')
+    } finally {
+      setBankSaving(false)
+    }
   }
 
   const startEditBank = (account: BankAccount) => {
@@ -435,13 +454,26 @@ export default function SettingsPage() {
     })
   }
 
-  const handleSaveBank = () => {
+  const updateDraftOpeningBalance = (value: number) => {
+    // The available balance moves with the opening balance so the correction carries through to Bank Balances.
+    setBankDraft((current) => ({ ...current, openingBalance: value, balance: Number((current.balance + value - current.openingBalance).toFixed(2)) }))
+  }
+
+  const handleSaveBank = async () => {
     const original = state.bankAccounts.find((account) => account.id === editingBankId)
     if (!original) return
     const institution = bankDraft.institution.trim()
     const accountName = bankDraft.accountName.trim()
     if (!institution || !accountName) {
       setBankEditStatus('Enter both a bank name and account name.')
+      return
+    }
+    if (!Number.isFinite(bankDraft.openingBalance) || bankDraft.openingBalance < 0) {
+      setBankEditStatus('Opening balance must be zero or more.')
+      return
+    }
+    if (!Number.isFinite(bankDraft.balance)) {
+      setBankEditStatus('Enter a valid available balance.')
       return
     }
     const accountKey = `${institution} — ${accountName}`
@@ -463,17 +495,23 @@ export default function SettingsPage() {
       balance: bankDraft.balance,
       status: bankDraft.status,
     }
-    const banks = { ...state.banks }
-    delete banks[original.name]
-    banks[accountKey] = updated.balance
-    updateState({
-      banks,
-      bankAccounts: state.bankAccounts.map((account) => (account.id === original.id ? updated : account)),
-      ...(renamed ? { bankTxns: state.bankTxns.map((txn) => (txn.bank === original.name ? { ...txn, bank: accountKey } : txn)) } : {}),
-    })
-    addAuditLog('UPDATE', 'BANK', accountKey, renamed ? `Updated bank account details (renamed from ${original.name}).` : 'Updated bank account details.')
-    setEditingBankId(null)
-    setBankCreationStatus(`${accountKey} was updated. Bank Balances now shows the new details.`)
+    setBankSaving(true)
+    setBankEditStatus('')
+    try {
+      await saveBankAccount(updated, original.name)
+      const openingChanged = Number(original.openingBalance || 0) !== updated.openingBalance
+      const details = [
+        renamed ? `renamed from ${original.name}` : '',
+        openingChanged ? `opening balance ${formatCurrency(Number(original.openingBalance || 0))} → ${formatCurrency(updated.openingBalance)}` : '',
+      ].filter(Boolean).join('; ')
+      addAuditLog('UPDATE', 'BANK', accountKey, details ? `Updated bank account details (${details}).` : 'Updated bank account details.')
+      setEditingBankId(null)
+      setBankCreationStatus(`${accountKey} was updated. Bank Balances now shows ${formatCurrency(updated.balance)}.`)
+    } catch (error) {
+      setBankEditStatus(error instanceof Error ? error.message : 'Unable to save the bank account.')
+    } finally {
+      setBankSaving(false)
+    }
   }
 
   const togglePermission = (permission: PermissionKey) => {
@@ -691,12 +729,12 @@ export default function SettingsPage() {
                   <div className="fg"><label>Opening balance date</label><input type="date" value={newBankOpeningDate} onChange={(event) => setNewBankOpeningDate(event.target.value)} /></div>
                 </div>
                 {bankCreationStatus && <div className="metric-note">{bankCreationStatus}</div>}
-                <button className="action-btn primary" type="button" onClick={handleCreateBank}>Create bank account</button>
+                <button className="action-btn primary" type="button" disabled={bankSaving} onClick={() => void handleCreateBank()}>{bankSaving && !editingBankId ? 'Saving…' : 'Create bank account'}</button>
                 <div className="bank-account-register settings-bank-register">
-                  <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening balance</span><span>Status</span><span /></div>
+                  <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening / current balance</span><span>Status</span><span /></div>
                   {state.bankAccounts.map((account) => (
                     <div key={account.id}>
-                      <div className="bank-register-row"><span><strong>{account.name}</strong><small>{account.accountNumber || 'No account number'}</small></span><span>{account.accountType}</span><span>{formatCurrency(account.openingBalance)}</span><span>{account.status}</span><span><button className="action-btn secondary bank-edit-btn" type="button" onClick={() => (editingBankId === account.id ? setEditingBankId(null) : startEditBank(account))}>{editingBankId === account.id ? 'Close' : 'Edit'}</button></span></div>
+                      <div className="bank-register-row"><span><strong>{account.name}</strong><small>{account.accountNumber || 'No account number'}</small></span><span>{account.accountType}</span><span><strong>{formatCurrency(account.openingBalance)}</strong><small>Current: {formatCurrency(state.banks[account.name] ?? account.balance ?? 0)}</small></span><span>{account.status}</span><span><button className="action-btn secondary bank-edit-btn" type="button" onClick={() => (editingBankId === account.id ? setEditingBankId(null) : startEditBank(account))}>{editingBankId === account.id ? 'Close' : 'Edit'}</button></span></div>
                       {editingBankId === account.id && (
                         <div className="bank-edit-panel">
                           <div className="form-grid two-up">
@@ -706,14 +744,14 @@ export default function SettingsPage() {
                             <div className="fg"><label>Account type</label><select value={bankDraft.accountType} onChange={(event) => setBankDraft({ ...bankDraft, accountType: event.target.value })}>{['Current', 'Savings', 'Cash', 'Wallet', 'Other', ...(['Current', 'Savings', 'Cash', 'Wallet', 'Other'].includes(bankDraft.accountType) ? [] : [bankDraft.accountType])].map((type) => <option key={type}>{type}</option>)}</select></div>
                             <div className="fg"><label>Currency</label><select value={bankDraft.currency} onChange={(event) => setBankDraft({ ...bankDraft, currency: event.target.value })}>{['NGN', 'USD', 'GBP', ...(['NGN', 'USD', 'GBP'].includes(bankDraft.currency) ? [] : [bankDraft.currency])].map((currency) => <option key={currency}>{currency}</option>)}</select></div>
                             <div className="fg"><label>Branch <small>(optional)</small></label><input value={bankDraft.branch} onChange={(event) => setBankDraft({ ...bankDraft, branch: event.target.value })} /></div>
-                            <div className="fg"><label>Opening balance</label><input type="number" min={0} step="0.01" value={bankDraft.openingBalance} onChange={(event) => setBankDraft({ ...bankDraft, openingBalance: Number(event.target.value || 0) })} /></div>
+                            <div className="fg"><label>Opening balance</label><input type="number" min={0} step="0.01" value={bankDraft.openingBalance} onChange={(event) => updateDraftOpeningBalance(Number(event.target.value || 0))} /></div>
                             <div className="fg"><label>Opening balance date</label><input type="date" value={bankDraft.openingBalanceDate} onChange={(event) => setBankDraft({ ...bankDraft, openingBalanceDate: event.target.value })} /></div>
-                            <div className="fg"><label>Available balance</label><input type="number" min={0} step="0.01" value={bankDraft.balance} onChange={(event) => setBankDraft({ ...bankDraft, balance: Number(event.target.value || 0) })} /></div>
+                            <div className="fg"><label>Available balance <small>(moves with opening balance)</small></label><input type="number" min={0} step="0.01" value={bankDraft.balance} onChange={(event) => setBankDraft({ ...bankDraft, balance: Number(event.target.value || 0) })} /></div>
                             <div className="fg"><label>Status</label><select value={bankDraft.status} onChange={(event) => setBankDraft({ ...bankDraft, status: event.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
                           </div>
                           {bankEditStatus && <div className="metric-note">{bankEditStatus}</div>}
                           <div className="bank-edit-actions">
-                            <button className="action-btn primary" type="button" onClick={handleSaveBank}>Save changes</button>
+                            <button className="action-btn primary" type="button" disabled={bankSaving} onClick={() => void handleSaveBank()}>{bankSaving ? 'Saving…' : 'Save changes'}</button>
                             <button className="action-btn secondary" type="button" onClick={() => setEditingBankId(null)}>Cancel</button>
                           </div>
                         </div>
