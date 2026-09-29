@@ -49,6 +49,18 @@ async function writeRowsWithSchemaFallback(rows: Record<string, unknown>[], oper
     return { data: null, error: new Error('Import could not match the database schema.') }
 }
 
+function escapeLike(value: string): string {
+    return value.replace(/[\\%_]/g, (character) => `\\${character}`)
+}
+
+function contactKey(type: string, name: string): string {
+    return `${type}:${name.trim().toLowerCase()}`
+}
+
+function withoutEmptyValues(values: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined && value !== null && value !== ''))
+}
+
 function normalizeContactType(value: string | undefined): string {
     const type = (value || '').toString().trim().toLowerCase()
     if (type.includes('supplier')) return 'supplier'
@@ -67,7 +79,7 @@ async function findOrCreateContact(contact: any, companyId: string): Promise<str
         .select('id')
         .eq('company_id', companyId)
         .eq('type', type)
-        .eq('name', name)
+        .ilike('name', escapeLike(name))
         .limit(1)
 
     if (existingErr) {
@@ -112,7 +124,7 @@ async function buildContactMap(contacts: any[], companyId: string): Promise<Cont
         const type = normalizeContactType(item.type || item.contact_type || item[''] || '')
         const name = String(item.name || item.full_name || item.customer || item.supplier || '').trim()
         if (!name) continue
-        const key = `${type}:${name}`
+        const key = contactKey(type, name)
         if (map[key]) continue
         const id = await findOrCreateContact(item, companyId)
         if (id) map[key] = id
@@ -123,19 +135,34 @@ async function buildContactMap(contacts: any[], companyId: string): Promise<Cont
 async function findOrCreateProduct(product: any, companyId: string): Promise<string | null> {
     if (!supabaseAdmin) return null
     const name = String(product.name || product.product || product.item || '').trim()
-    const explicitSku = String(product.sku || product.product_code || product.item_code || '').trim()
-    const sku = explicitSku || generateSku(name)
-    if (!sku || !name) return null
+    const explicitSku = product.skuGenerated ? '' : String(product.sku || product.product_code || product.item_code || '').trim()
+    if (!name) return null
 
-    const { data: existing, error: existingErr } = await supabaseAdmin
-        .from('products')
-        .select('id')
-        .eq('company_id', companyId)
-        .eq('sku', sku)
-        .limit(1)
+    const findBy = async (column: 'sku' | 'name', value: string) => {
+        const { data, error } = await supabaseAdmin!
+            .from('products')
+            .select('id,sku')
+            .eq('company_id', companyId)
+            .ilike(column, escapeLike(value))
+            .limit(1)
+        if (error) throw error
+        return data || []
+    }
 
-    if (existingErr) {
-        throw existingErr
+    let existing = explicitSku ? await findBy('sku', explicitSku) : []
+    const matchedBySku = existing.length > 0
+    if (!matchedBySku) existing = (await findBy('name', name)).filter((item: any) => !explicitSku || !String(item.sku || '').trim())
+
+    let sku = explicitSku || existing[0]?.sku || ''
+    if (!sku) {
+        const prefix = generateSku(name).replace(/-\d+$/, '')
+        const { data: prefixed, error: prefixedErr } = await supabaseAdmin
+            .from('products')
+            .select('sku')
+            .eq('company_id', companyId)
+            .ilike('sku', `${escapeLike(prefix)}-%`)
+        if (prefixedErr) throw prefixedErr
+        sku = generateSku(name, (prefixed || []).map((item: any) => String(item.sku || '')))
     }
 
     const insertData = {
@@ -155,8 +182,10 @@ async function findOrCreateProduct(product: any, companyId: string): Promise<str
         updated_at: new Date().toISOString(),
     }
 
-    if (existing && existing.length > 0) {
-        const { data: updated, error: updateErr } = await writeWithSchemaFallback(insertData, (values) => supabaseAdmin!
+    if (existing.length > 0) {
+        const provided: string[] = Array.isArray(product.providedFields) ? product.providedFields.map(String) : Object.keys(insertData)
+        const updateData = Object.fromEntries(Object.entries(insertData).filter(([column]) => column === 'updated_at' || (column === 'sku' && !matchedBySku) || (column === 'name' && matchedBySku) || (provided.includes(column) && column !== 'created_at')))
+        const { data: updated, error: updateErr } = await writeWithSchemaFallback(updateData, (values) => supabaseAdmin!
             .from('products')
             .update(values)
             .eq('id', existing[0].id)
@@ -189,40 +218,46 @@ async function findOrCreateStaff(staff: any, companyId: string): Promise<string 
     const fullName = String(staff.name || staff.full_name || '').trim() || username || staffId
     if (!fullName) return null
 
-    const query = supabaseAdmin.from('users').select('id').or(
-        [
-            staffId ? `staff_id.eq.${staffId}` : undefined,
-            username ? `username.eq.${username}` : undefined,
-        ]
-            .filter(Boolean)
-            .join(',')
-    )
-
-    const { data: existing, error: existingErr } = await query.eq('company_id', companyId).limit(1)
-    if (existingErr) {
-        throw existingErr
+    let existing: any[] = []
+    for (const [column, value] of [['staff_id', staffId], ['username', username]] as const) {
+        if (!value || existing.length > 0) continue
+        const { data, error } = await supabaseAdmin
+            .from('users')
+            .select('id')
+            .eq('company_id', companyId)
+            .ilike(column, escapeLike(value))
+            .limit(1)
+        if (error) throw error
+        existing = data || []
     }
 
-    const insertData = {
+    const providedData = {
         company_id: companyId,
         staff_id: staffId || null,
         username: username || null,
-        email: staff.email || `${username || staffId || 'imported'}@local`,
+        email: staff.email || null,
         full_name: fullName,
-        role: String(staff.roleId || staff.role || 'staff'),
+        role: staff.roleId || staff.role || null,
         phone: staff.phone || null,
-        status: staff.status || 'active',
+        status: staff.status || null,
         branch: staff.branch || null,
         department: staff.department || null,
         position: staff.position || null,
         employee_id: staff.employeeId || staff.employee_id || null,
         pin: staff.pin || null,
-        created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
     }
+    const insertData = {
+        ...providedData,
+        email: providedData.email || `${username || staffId || 'imported'}@local`,
+        status: providedData.status || 'active',
+        role: providedData.role || 'staff',
+        pin: providedData.pin || '0000',
+        created_at: new Date().toISOString(),
+    }
 
-    if (existing && existing.length > 0) {
-        const { data: updated, error: updateErr } = await writeWithSchemaFallback(insertData, (values) => supabaseAdmin!
+    if (existing.length > 0) {
+        const { data: updated, error: updateErr } = await writeWithSchemaFallback(withoutEmptyValues(providedData), (values) => supabaseAdmin!
             .from('users')
             .update(values)
             .eq('id', existing[0].id)
@@ -255,7 +290,7 @@ async function insertSaleRecords(sales: any[], contactMap: ContactMap, companyId
         company_id: companyId,
         reference: String(sale.reference || sale.id || '').trim() || `S-${Date.now()}`,
         sale_date: sale.sale_date || sale.date || new Date().toISOString().slice(0, 10),
-        customer_id: contactMap[`customer:${String(sale.customer || 'Unknown Customer').trim()}`] || null,
+        customer_id: contactMap[contactKey('customer', String(sale.customer || 'Unknown Customer'))] || null,
         branch: sale.branch || null,
         sales_rep: sale.sales_rep || sale.enteredBy || null,
         payment_method: sale.paymentMethod || sale.payment_method || 'Transfer',
@@ -330,7 +365,7 @@ async function insertPurchaseRecords(purchases: any[], contactMap: ContactMap, c
         company_id: companyId,
         reference: String(purchase.reference || purchase.id || '').trim() || `P-${Date.now()}`,
         purchase_date: purchase.purchase_date || purchase.date || new Date().toISOString().slice(0, 10),
-        supplier_id: contactMap[`supplier:${String(purchase.supplier || 'Unknown Supplier').trim()}`] || null,
+        supplier_id: contactMap[contactKey('supplier', String(purchase.supplier || 'Unknown Supplier'))] || null,
         branch: purchase.branch || null,
         invoice_number: purchase.invoiceNumber || purchase.invoice_number || null,
         purchase_order: purchase.purchaseOrder || purchase.purchase_order || null,
@@ -422,6 +457,15 @@ async function insertExpenseRecords(expenses: any[], companyId: string): Promise
 }
 
 function formatErrorMessage(error: unknown): string {
+    const message = rawErrorMessage(error)
+    const decimal = message.match(/invalid input syntax for type integer: "?([^"]+)"?/i)
+    if (decimal) {
+        return `The database only accepts whole-number quantities, but the file contains ${decimal[1]}. Run migrations/030_decimal_inventory_quantities.sql in the Supabase SQL editor to allow decimal quantities, or round the quantity columns in your file.`
+    }
+    return message
+}
+
+function rawErrorMessage(error: unknown): string {
     if (!error) return 'Unknown server error'
     if (error instanceof Error) return error.message
     if (typeof error === 'string') return error
@@ -473,17 +517,17 @@ export async function POST(request: Request) {
 
         for (const sale of sales) {
             const name = String(sale.customer || sale.customer_name || sale.client || sale.name || 'Unknown Customer').trim()
-            if (name) {
+            if (name && !contactMap[contactKey('customer', name)]) {
                 const id = await findOrCreateContact({ type: 'customer', name }, companyId)
-                if (id) contactMap[`customer:${name}`] = id
+                if (id) contactMap[contactKey('customer', name)] = id
             }
         }
 
         for (const purchase of purchases) {
             const name = String(purchase.supplier || purchase.supplier_name || purchase.vendor || purchase.name || 'Unknown Supplier').trim()
-            if (name) {
+            if (name && !contactMap[contactKey('supplier', name)]) {
                 const id = await findOrCreateContact({ type: 'supplier', name }, companyId)
-                if (id) contactMap[`supplier:${name}`] = id
+                if (id) contactMap[contactKey('supplier', name)] = id
             }
         }
 

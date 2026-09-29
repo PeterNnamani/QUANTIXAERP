@@ -24,18 +24,32 @@ export type ImportSummary = {
     unknown: number
 }
 
-function normalizeKey(value: string): string {
+export function normalizeKey(value: string): string {
     return value
         .toString()
-        .trim()
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, ' ')
         .replace(/\s+/g, ' ')
+        .trim()
 }
 
 function stringValue(value: unknown): string {
     if (value === null || value === undefined) return ''
     return String(value).trim()
+}
+
+export function matchKey(value: unknown): string {
+    return stringValue(value).toLowerCase().replace(/\s+/g, ' ')
+}
+
+const SHEET_CATEGORY_KEY = 'sheetCategory'
+
+function firstPresent(row: ImportRecord, keys: string[]): unknown {
+    for (const key of keys) {
+        const value = row[key]
+        if (value !== undefined && value !== null && stringValue(value) !== '') return value
+    }
+    return undefined
 }
 
 function normalizeRowKeys(row: ImportRecord): ImportRecord {
@@ -75,17 +89,21 @@ export function parseImportDate(value: unknown): string {
     return Number.isNaN(parsed.getTime()) || parsed.getUTCFullYear() < 1000 || parsed.getUTCFullYear() > 9999 ? fallback : parsed.toISOString().slice(0, 10)
 }
 
+function columnKeys(row: ImportRecord): string[] {
+    return Object.keys(row).filter((key) => key !== SHEET_CATEGORY_KEY).map(normalizeKey)
+}
+
 function hasKey(row: ImportRecord, keys: string[]) {
-    const normalized = Object.keys(row).map(normalizeKey)
+    const normalized = columnKeys(row)
     return keys.some((key) => normalized.some((item) => item.includes(key)))
 }
 
 export function classifyImportRow(row: ImportRecord): 'sales' | 'purchases' | 'expenses' | 'inventory' | 'staff' | 'contact' | 'unknown' {
-    const normalizedKeys = Object.keys(row).map(normalizeKey)
+    const normalizedKeys = columnKeys(row)
     const lowerValues = Object.values(row).map((value) => stringValue(value).toLowerCase()).join(' ')
 
-    const staffKeys = ['staff id', 'employee id', 'username', 'full name', 'role', 'department', 'position', 'email']
-    const inventoryKeys = ['sku', 'product', 'item', 'name', 'description', 'stock qty', 'opening stock qty', 'stock bal', 'stock balance', 'stock balance', 'quantity', 'qty sold', 'selling price', 'unit price', 'selling price', 'sales revenue', 'profit', 'cogs', 'unit cost', 'branch', 'reorder', 'department', 'category', 'category name', 'closing', 'opening', 'available', 'no. purchased', 'total']
+    const staffKeys = ['staff', 'employee id', 'username', 'full name', 'role', 'department', 'position', 'email', 'pin', 'last login']
+    const inventoryKeys = ['sku', 'product', 'item', 'name', 'description', 'stock', 'quantity', 'qty sold', 'selling price', 'unit price', 'sales revenue', 'profit', 'cogs', 'unit cost', 'cost price', 'branch', 'reorder', 'department', 'category', 'closing', 'opening', 'available', 'purchased', 'total']
     const saleKeys = ['sale date', 'sale_date', 'customer', 'invoice', 'receipt', 'payment method', 'payment status', 'total amount', 'amount paid']
     const purchaseKeys = ['purchase date', 'supplier', 'invoice number', 'purchase order', 'payment status', 'total', 'amount paid', 'balance']
     const expenseKeys = ['expense date', 'expense', 'expense number', 'expense category', 'payee', 'vendor', 'amount', 'expense account']
@@ -121,6 +139,11 @@ export function classifyImportRow(row: ImportRecord): 'sales' | 'purchases' | 'e
         return 'sales'
     }
 
+    const hasStaffIdentity = hasKey(row, ['staff id', 'employee id', 'username', 'pin', 'role', 'last login'])
+    if (hasStaffIdentity && !hasKey(row, ['sku', 'product', 'item']) && staffScore >= 4) {
+        return 'staff'
+    }
+
     const winner = (Object.keys(scores) as Array<keyof typeof scores>).reduce((best, current) =>
         scores[current] > scores[best] ? current : best,
         'contact' as keyof typeof scores
@@ -140,13 +163,15 @@ export function classifyImportRow(row: ImportRecord): 'sales' | 'purchases' | 'e
     return winner
 }
 
+const EXPENSE_STATUSES = ['Pending Approval', 'Approved', 'Scheduled', 'Overdue', 'Rejected']
+
 function normalizeExpenseRow(row: ImportRecord) {
     const reference = stringValue(row['reference'] || row['expense number'] || row['expense no'] || row['expense'] || row['number'] || makeID('EXP'))
     const description = stringValue(row['description'] || row['expense description'] || row['expense'] || row['details'] || row['name']) || 'Imported expense'
     const category = stringValue(row['category'] || row['expense category'] || row['expense account'] || 'General') || 'General'
     const amount = Math.max(0, parseNumeric(row['amount'] || row['total'] || row['expense amount'] || row['value'] || 0))
-    const rawStatus = stringValue(row['status'] || 'Pending Approval') || 'Pending Approval'
-    const status = rawStatus.toLowerCase() === 'paid' ? 'ACTIVE' : rawStatus
+    const rawStatus = matchKey(row['status'] || row['payment status'])
+    const status = rawStatus === 'paid' ? 'ACTIVE' : EXPENSE_STATUSES.find((option) => option.toLowerCase() === rawStatus) || 'Pending Approval'
     const vendor = stringValue(row['vendor'] || row['payee'] || row['supplier'] || '')
     const department = stringValue(row['department'] || row['dept'] || '')
     const payment = stringValue(row['payment method'] || row['payment'] || row['method'] || '')
@@ -175,10 +200,24 @@ function buildContactType(row: ImportRecord): string {
     return 'customer'
 }
 
+export function normalizePaymentStatus(value: unknown): string {
+    const status = stringValue(value).toUpperCase().replace(/[\s_-]+/g, ' ')
+    if (!status) return 'PAID'
+    if (['OUTSTANDING', 'UNPAID', 'ON CREDIT'].includes(status)) return 'CREDIT'
+    if (['PART PAID', 'PARTIAL', 'PARTIALLY PAID', 'PART PAYMENT'].includes(status)) return 'PART PAYMENT'
+    return status
+}
+
+function importedAmountPaid(row: ImportRecord, total: number, paymentStatus: string): number {
+    const explicit = firstPresent(row, ['amount paid', 'paid amount', 'paid'])
+    if (explicit !== undefined) return Math.max(0, parseNumeric(explicit))
+    return paymentStatus === 'PAID' ? total : 0
+}
+
 function normalizeSaleRow(row: ImportRecord) {
     const customer = buildCustomerName(row) || 'Walk-in Customer'
     const paymentMethod = stringValue(row['payment method'] || row['payment_method'] || row['method'] || 'Transfer') || 'Transfer'
-    const paymentStatus = stringValue(row['payment status'] || row['payment_status'] || row['status'] || 'PAID').toUpperCase() || 'PAID'
+    const paymentStatus = normalizePaymentStatus(row['payment status'] || row['status'])
     const saleDate = parseImportDate(row['sale date'] || row['sale_date'] || row['date'] || row['transaction date'] || row['transaction_date'])
     const reference = stringValue(row['reference'] || row['invoice number'] || row['invoice_number'] || row['invoice'] || makeID('SL'))
     const notes = stringValue(row['notes'] || row['memo'] || row['description'] || '')
@@ -193,8 +232,8 @@ function normalizeSaleRow(row: ImportRecord) {
     const discount = Math.max(0, parseNumeric(row['discount'] || 0))
     const shipping = Math.max(0, parseNumeric(row['shipping'] || row['shipping amount'] || 0))
     const totalAmount = Math.max(0, parseNumeric(row['total amount'] || row['total_amount'] || row['total'] || subtotal))
-    const amountPaid = Math.max(0, parseNumeric(row['amount paid'] || row['paid amount'] || row['amount_paid'] || row['paid'] || totalAmount))
-    const balance = Math.max(0, parseNumeric(row['balance'] || row['balance amount'] || row['balance_amount'] || totalAmount - amountPaid || 0))
+    const amountPaid = importedAmountPaid(row, totalAmount, paymentStatus)
+    const balance = Math.max(0, parseNumeric(firstPresent(row, ['balance', 'balance amount']) ?? totalAmount - amountPaid))
 
     return {
         id: makeID('SL'),
@@ -234,8 +273,7 @@ function normalizePurchaseRow(row: ImportRecord) {
     const invoiceNumber = stringValue(row['invoice number'] || row['invoice_number'] || row['invoice'] || '')
     const purchaseOrder = stringValue(row['purchase order'] || row['purchase_order'] || '')
     const paymentMethod = stringValue(row['payment method'] || row['payment'] || row['payment_method'] || row['method'] || 'Cash') || 'Cash'
-    const rawPaymentStatus = stringValue(row['payment status'] || row['payment_status'] || row['status'] || 'PAID').toUpperCase() || 'PAID'
-    const paymentStatus = rawPaymentStatus === 'OUTSTANDING' ? 'CREDIT' : rawPaymentStatus
+    const paymentStatus = normalizePaymentStatus(row['payment status'] || row['status'])
     const notes = stringValue(row['notes'] || row['memo'] || row['description'] || '')
     const branch = stringValue(row['branch'] || row['location'] || 'Head Office') || 'Head Office'
     const itemName = stringValue(row['product'] || row['item'] || row['description'] || row['product name'] || row['product_name'])
@@ -246,8 +284,8 @@ function normalizePurchaseRow(row: ImportRecord) {
     const discount = Math.max(0, parseNumeric(row['discount'] || 0))
     const shipping = Math.max(0, parseNumeric(row['shipping'] || row['shipping amount'] || 0))
     const total = Math.max(0, parseNumeric(row['total'] || subtotal))
-    const amountPaid = Math.max(0, parseNumeric(row['amount paid'] || row['amount_paid'] || row['paid'] || total))
-    const balance = Math.max(0, parseNumeric(row['balance'] || total - amountPaid || 0))
+    const amountPaid = importedAmountPaid(row, total, paymentStatus)
+    const balance = Math.max(0, parseNumeric(firstPresent(row, ['balance', 'balance amount']) ?? total - amountPaid))
 
     return {
         id: makeID('PUR'),
@@ -284,6 +322,36 @@ function normalizePurchaseRow(row: ImportRecord) {
     }
 }
 
+const PRODUCT_COLUMNS = {
+    category: ['category', 'dept', 'department'],
+    stock_qty: ['march stock count', 'items in stock', 'stock qty', 'stock quantity', 'physical stock', 'current stock', 'stock count', 'stock balance', 'stock', 'closing', 'closing stock', 'quantity', 'qty', 'opening stock qty', 'opening stock', 'book stock'],
+    unit_cost: ['unit cost', 'cost price', 'cost'],
+    unit_price: ['selling price', 'unit selling price', 'sellingprice', 'unit price', 'price'],
+    purchased: ['purchased', 'purchase qty', 'purchased qty', 'no purchased'],
+    sold: ['sold', 'sold qty', 'qty sold'],
+    description: ['description', 'product description'],
+    branch: ['branch', 'location'],
+    reorder_level: ['reorder level', 'reorder'],
+}
+
+const INVENTORY_FIELDS_BY_PRODUCT_FIELD: Record<string, string[]> = {
+    category: ['dept'],
+    stock_qty: ['openQty', 'closing'],
+    unit_cost: ['unitCost'],
+    unit_price: ['sellingPrice'],
+    purchased: ['purchased'],
+    sold: ['sold'],
+    description: ['description'],
+    branch: ['branch'],
+    reorder_level: ['reorderLevel'],
+}
+
+export function mergeImportedInventoryItem<T extends { product: string; sku?: string }>(existing: T, imported: Partial<T>, product: { providedFields?: unknown }): T {
+    const provided = Array.isArray(product.providedFields) ? product.providedFields.map(String) : Object.keys(INVENTORY_FIELDS_BY_PRODUCT_FIELD)
+    const updates = Object.fromEntries(provided.flatMap((field) => INVENTORY_FIELDS_BY_PRODUCT_FIELD[field] || []).filter((key) => key in imported).map((key) => [key, imported[key as keyof T]]))
+    return { ...existing, ...updates, sku: existing.sku || imported.sku }
+}
+
 function normalizeProductRow(row: ImportRecord, existingSkus: string[]) {
     const name = buildProductName(row) || 'Unnamed Product'
     const explicitSku = stringValue(row['sku'] || row['product code'] || row['item code'] || '')
@@ -291,19 +359,23 @@ function normalizeProductRow(row: ImportRecord, existingSkus: string[]) {
     if (!sku || sku === 'UNNAMED-PRODUCT') {
         sku = makeID('SKU')
     }
-    const category = stringValue(row['category'] || row['dept'] || row['department'] || row['sheetCategory'] || 'General') || 'General'
-    const stockQty = Math.max(0, parseNumeric(row['march stock count'] || row['items in stock'] || row['stock qty'] || row['closing'] || row['quantity'] || row['qty'] || row['opening stock qty'] || 0))
-    const unitCost = Math.max(0, parseNumeric(row['unit cost'] || row['unit_cost'] || row['cost price'] || row['cost'] || 0))
-    const unitPrice = Math.max(0, parseNumeric(row['selling price'] || row['unit selling price'] || row['sellingprice'] || row['unit price'] || row['unit_price'] || row['price'] || 0))
-    const purchased = Math.max(0, parseNumeric(row['purchased'] || row['purchase qty'] || row['purchased qty'] || row['no. purchased'] || 0))
-    const sold = Math.max(0, parseNumeric(row['sold'] || row['sold qty'] || row['qty sold'] || 0))
-    const description = stringValue(row['description'] || row['product description'] || '')
-    const branch = stringValue(row['branch'] || row['location'] || '')
-    const reorderLevel = Math.max(0, parseNumeric(row['reorder level'] || row['reorder_level'] || row['reorder'] || 0))
+    const rawCategory = firstPresent(row, PRODUCT_COLUMNS.category)
+    const category = stringValue(rawCategory ?? row[SHEET_CATEGORY_KEY]) || 'General'
+    const stockQty = Math.max(0, parseNumeric(firstPresent(row, PRODUCT_COLUMNS.stock_qty) ?? 0))
+    const unitCost = Math.max(0, parseNumeric(firstPresent(row, PRODUCT_COLUMNS.unit_cost) ?? 0))
+    const unitPrice = Math.max(0, parseNumeric(firstPresent(row, PRODUCT_COLUMNS.unit_price) ?? 0))
+    const purchased = Math.max(0, parseNumeric(firstPresent(row, PRODUCT_COLUMNS.purchased) ?? 0))
+    const sold = Math.max(0, parseNumeric(firstPresent(row, PRODUCT_COLUMNS.sold) ?? 0))
+    const description = stringValue(firstPresent(row, PRODUCT_COLUMNS.description))
+    const branch = stringValue(firstPresent(row, PRODUCT_COLUMNS.branch))
+    const reorderLevel = Math.max(0, parseNumeric(firstPresent(row, PRODUCT_COLUMNS.reorder_level) ?? 0))
+    const providedFields = (Object.keys(PRODUCT_COLUMNS) as Array<keyof typeof PRODUCT_COLUMNS>).filter((field) => PRODUCT_COLUMNS[field].some((column) => column in row))
 
     return {
         id: makeID('PRD'),
         sku,
+        skuGenerated: !explicitSku,
+        providedFields,
         name,
         description,
         category,
@@ -323,15 +395,21 @@ function normalizeProductRow(row: ImportRecord, existingSkus: string[]) {
     }
 }
 
+function normalizeStaffStatus(value: unknown): '' | 'active' | 'disabled' {
+    const status = matchKey(value)
+    if (!status) return ''
+    return ['disabled', 'inactive', 'suspended', 'deactivated'].includes(status) ? 'disabled' : 'active'
+}
+
 function normalizeStaffRow(row: ImportRecord) {
     const fullName = stringValue(row['full name'] || row['full_name'] || row['staff name'] || row['employee name'] || row['name'] || '')
     const username = stringValue(row['username'] || row['user name'] || row['login'] || '')
     const staffId = stringValue(row['staff id'] || row['employee id'] || row['id'] || '')
-    const roleName = stringValue(row['role'] || row['job title'] || row['position'] || 'Staff') || 'Staff'
+    const roleName = stringValue(row['role'] || row['job title'] || row['position'])
     const department = stringValue(row['department'] || row['dept'] || '')
     const position = stringValue(row['position'] || row['job title'] || '')
     const branch = stringValue(row['branch'] || row['office'] || row['location'] || '')
-    const email = stringValue(row['email'] || `${username || staffId || 'user'}@local`)
+    const email = stringValue(row['email'])
     const phone = stringValue(row['phone'] || row['mobile'] || row['contact'] || '')
 
     return {
@@ -341,16 +419,16 @@ function normalizeStaffRow(row: ImportRecord) {
         username,
         email,
         phone,
-        roleId: roleName.toLowerCase().replace(/\s+/g, '-') || 'staff',
+        roleId: roleName.toLowerCase().replace(/\s+/g, '-'),
         roleName,
         permissions: ['dashboard'],
         dataScope: 'team',
-        status: stringValue(row['status'] || 'active') || 'active',
+        status: normalizeStaffStatus(row['status']),
         branch,
         department,
         position,
         employeeId: staffId,
-        pin: stringValue(row['pin'] || '0000'),
+        pin: stringValue(row['pin']),
         createdAt: new Date().toISOString(),
     }
 }
@@ -366,7 +444,7 @@ function normalizeContactRow(row: ImportRecord) {
         address: stringValue(row['address'] || row['location'] || ''),
         credit_limit: parseNumeric(row['credit limit'] || row['credit_limit'] || 0),
         opening_balance: parseNumeric(row['opening balance'] || row['opening_balance'] || 0),
-        status: stringValue(row['status'] || 'active') || 'active',
+        status: matchKey(row['status']) || 'active',
     }
 }
 
@@ -382,6 +460,50 @@ const dedupe = <T>(items: T[], keyFn: (item: T) => string) => {
     return Array.from(seen.values())
 }
 
+export function mergeUniqueNames(existing: string[], incoming: string[]): string[] {
+    const seen = new Set(existing.map(matchKey))
+    const merged = [...existing]
+    incoming.forEach((name) => {
+        const key = matchKey(name)
+        if (!key || seen.has(key)) return
+        seen.add(key)
+        merged.push(stringValue(name))
+    })
+    return merged
+}
+
+type ImportedProductRef = { sku?: unknown; skuGenerated?: unknown; name?: unknown; product?: unknown; item?: unknown }
+
+export function findImportedInventoryIndex<T extends { product: string; sku?: string }>(inventory: T[], product: ImportedProductRef): number {
+    const sku = product.skuGenerated ? '' : matchKey(product.sku)
+    if (sku) {
+        const skuIndex = inventory.findIndex((item) => matchKey(item.sku) === sku)
+        if (skuIndex >= 0) return skuIndex
+    }
+    const name = matchKey(product.name || product.product || product.item)
+    return name ? inventory.findIndex((item) => matchKey(item.product) === name && (!sku || !matchKey(item.sku))) : -1
+}
+
+const STAFF_KEYS_KEPT_ON_MERGE = ['id', 'permissions', 'dataScope', 'createdAt']
+
+export function mergeImportedStaff<T extends { id: string; staffId: string; username?: string; pin?: string; status?: string; roleId?: string; roleName?: string }>(existing: T[], incoming: T[]): T[] {
+    const merged = [...existing]
+    incoming.forEach((staff) => {
+        const staffId = matchKey(staff.staffId)
+        const username = matchKey(staff.username)
+        const index = merged.findIndex((item) => (staffId && matchKey(item.staffId) === staffId) || (username && matchKey(item.username) === username))
+        if (index < 0) {
+            merged.push({ ...staff, pin: staff.pin || '0000', status: staff.status || 'active', roleId: staff.roleId || 'staff', roleName: staff.roleName || 'Staff' })
+            return
+        }
+        const provided = Object.fromEntries(Object.entries(staff).filter(([key, value]) => !STAFF_KEYS_KEPT_ON_MERGE.includes(key) && value !== undefined && value !== null && value !== ''))
+        const current = merged[index]
+        merged[index] = { ...current, ...provided, id: current.id, staffId: current.staffId || staff.staffId }
+        if (current.username) merged[index].username = current.username
+    })
+    return merged
+}
+
 export function prepareGenericImportPayload(rows: ImportRecord[]): { payload: GenericImportPayload; summary: ImportSummary } {
     const payload: GenericImportPayload = {
         sales: [],
@@ -391,6 +513,7 @@ export function prepareGenericImportPayload(rows: ImportRecord[]): { payload: Ge
         staff: [],
         contacts: [],
     }
+    let unknown = 0
 
     rows.forEach((row) => {
         const category = classifyImportRow(row)
@@ -447,14 +570,16 @@ export function prepareGenericImportPayload(rows: ImportRecord[]): { payload: Ge
             payload.contacts.push({ type: 'supplier', name: supplier, email: '', phone: '' })
             return
         }
+
+        unknown += 1
     })
 
-    payload.sales = dedupe(payload.sales, (item) => String(item.reference || item.id || ''))
-    payload.purchases = dedupe(payload.purchases, (item) => String(item.reference || item.id || ''))
-    payload.expenses = dedupe(payload.expenses, (item) => String(item.reference || item.id || ''))
-    payload.products = dedupe(payload.products, (item) => String(item.sku || item.name || item.id || ''))
-    payload.staff = dedupe(payload.staff, (item) => String(item.username || item.staffId || item.id || ''))
-    payload.contacts = dedupe(payload.contacts, (item) => `${String(item.type || 'customer')}|${String(item.name || '')}`)
+    payload.sales = dedupe(payload.sales, (item) => matchKey(item.reference || item.id))
+    payload.purchases = dedupe(payload.purchases, (item) => matchKey(item.reference || item.id))
+    payload.expenses = dedupe(payload.expenses, (item) => matchKey(item.reference || item.id))
+    payload.products = dedupe(payload.products, (item) => matchKey(item.skuGenerated ? item.name : item.sku || item.name || item.id))
+    payload.staff = dedupe(payload.staff, (item) => matchKey(item.username || item.staffId || item.id))
+    payload.contacts = dedupe(payload.contacts, (item) => `${matchKey(item.type || 'customer')}|${matchKey(item.name)}`)
 
     const summary: ImportSummary = {
         sales: payload.sales.length,
@@ -463,7 +588,7 @@ export function prepareGenericImportPayload(rows: ImportRecord[]): { payload: Ge
         products: payload.products.length,
         staff: payload.staff.length,
         contacts: payload.contacts.length,
-        unknown: Math.max(0, rows.length - (payload.sales.length + payload.purchases.length + payload.expenses.length + payload.products.length + payload.staff.length + payload.contacts.length)),
+        unknown,
     }
 
     return { payload, summary }
@@ -478,7 +603,7 @@ export async function parseSpreadsheetFile(file: File): Promise<ImportRecord[]> 
         if (lines.length < 2) return []
         const delimiter = lines[0].includes('\t') ? '\t' : lines[0].includes('|') ? '|' : ','
         const headers = lines[0].split(delimiter).map((header) => header.trim())
-        return lines.slice(1).map((line) => line.split(delimiter).reduce((row, value, index) => ({ ...row, [headers[index] || `Column ${index + 1}`]: value.trim() }), {} as ImportRecord))
+        return lines.slice(1).map((line) => normalizeRowKeys(line.split(delimiter).reduce((row, value, index) => ({ ...row, [headers[index] || `Column ${index + 1}`]: value.trim() }), {} as ImportRecord)))
     }
     let workbook: XLSX.WorkBook
 
@@ -498,15 +623,7 @@ export async function parseSpreadsheetFile(file: File): Promise<ImportRecord[]> 
         const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
         if (sheetRows.length > 0) {
             const normalizedSheetName = sheetName.trim()
-            const rowsWithCategory = sheetRows.map((row) => ({
-                ...normalizeRowKeys(row),
-                sheetCategory: normalizedSheetName,
-                category: (() => {
-                    const normalizedRow = normalizeRowKeys(row)
-                    return normalizedRow['category'] || normalizedRow['dept'] || normalizedRow['department'] || normalizedSheetName
-                })(),
-            }))
-            rows.push(...rowsWithCategory)
+            rows.push(...sheetRows.map((row) => ({ ...normalizeRowKeys(row), [SHEET_CATEGORY_KEY]: normalizedSheetName })))
         }
     })
 

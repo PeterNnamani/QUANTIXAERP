@@ -8,7 +8,7 @@ import { Sale } from '@/lib/context'
 import { buildReceivableFromSale, mergeReceivablesFromSales } from '@/lib/receivables'
 import { formatCurrency, makeID, getCurrentDate, PAYMENT_TERMS, canEdit, parseNumeric, triggerAppToast } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
-import { parseExcelFile, parseImportDate } from '@/lib/import-utils'
+import { findImportedInventoryIndex, normalizePaymentStatus, parseExcelFile, parseImportDate } from '@/lib/import-utils'
 
 const branchOptions = ['All Branches', 'Head Office', 'Retail Outlet', 'Warehouse 01', 'Warehouse 02']
 const paymentMethods = ['All Payment Methods', 'Cash', 'Transfer', 'Cheque', 'Mobile Money', 'POS', 'Credit']
@@ -381,17 +381,17 @@ export default function SalesPage() {
     importRows.forEach((row) => {
       const customer = String(row['customer'] || row['client'] || row['customer name'] || 'Walk-in Customer').trim()
       const paymentMethod = String(row['payment method'] || row['paymentmethod'] || row['method'] || 'Transfer').trim() || 'Transfer'
-      const paymentStatus = String(row['payment status'] || row['paymentstatus'] || row['status'] || 'PAID').trim().toUpperCase() as 'PAID' | 'CREDIT' | 'PART PAYMENT' | 'OVERDUE'
+      const paymentStatus = normalizePaymentStatus(row['payment status'] || row['paymentstatus'] || row['status']) as 'PAID' | 'CREDIT' | 'PART PAYMENT' | 'OVERDUE'
       const date = parseImportDate(row['sale date'] || row['date'])
       const notes = String(row['notes'] || row['memo'] || row['description'] || '').trim()
       const branch = String(row['branch'] || row['location'] || 'Head Office').trim() || 'Head Office'
       const salesRep = String(row['sales rep'] || row['salesrep'] || row['entered by'] || user?.name || 'System').trim()
       const deviceUsed: Sale['deviceUsed'] = /android|iphone|ipad|mobile/i.test(navigator.userAgent) ? 'Phone' : 'PC'
 
-      const itemProduct = String(row['product'] || row['item'] || row['description'] || '').trim()
+      const itemProduct = String(row['product'] || row['product name'] || row['item'] || row['items'] || row['description'] || '').trim()
       const requestedDept = String(row['category'] || row['dept'] || row['department'] || '').trim()
       const qty = Math.max(0, parseNumeric(row['quantity'] || row['qty'] || row['units'] || 1))
-      const inventoryIndex = inventoryUpdates.findIndex((item) => item.product?.toLowerCase() === itemProduct.toLowerCase())
+      const inventoryIndex = findImportedInventoryIndex(inventoryUpdates, { product: itemProduct, sku: row['sku'] })
       const inventoryItem = inventoryIndex >= 0 ? inventoryUpdates[inventoryIndex] : undefined
       if (!inventoryItem) {
         importErrors.push(`${itemProduct || 'Blank product'} is not in inventory`)
@@ -410,7 +410,7 @@ export default function SalesPage() {
         id: makeID('INV'),
         date,
         customer,
-        items: [{ product: itemProduct, dept: itemDept, qty, unitPrice, total: subtotal }],
+        items: [{ product: inventoryItem.product, dept: itemDept, qty, unitPrice, total: subtotal }],
         totalAmount,
         paymentMethod,
         paymentStatus,

@@ -235,17 +235,17 @@ CREATE TABLE IF NOT EXISTS products (
   category text,
   unit_cost numeric(18,2) NOT NULL DEFAULT 0,
   unit_price numeric(18,2) NOT NULL DEFAULT 0,
-  stock_qty integer NOT NULL DEFAULT 0,
+  stock_qty numeric(18,3) NOT NULL DEFAULT 0,
   expiry_date date,
-  damaged_expired integer NOT NULL DEFAULT 0,
-  reorder_level integer NOT NULL DEFAULT 0,
+  damaged_expired numeric(18,3) NOT NULL DEFAULT 0,
+  reorder_level numeric(18,3) NOT NULL DEFAULT 0,
   branch text,
   created_at timestamptz NOT NULL DEFAULT NOW(),
   updated_at timestamptz NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE products ADD COLUMN IF NOT EXISTS expiry_date date;
-ALTER TABLE products ADD COLUMN IF NOT EXISTS damaged_expired integer NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS damaged_expired numeric(18,3) NOT NULL DEFAULT 0;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS description text;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS branch text;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode text;
@@ -255,10 +255,10 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS uom text NOT NULL DEFAULT 'Unit';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS pack_size text;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS base_unit text;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS conversion_factor numeric(18,6) NOT NULL DEFAULT 1;
-ALTER TABLE products ADD COLUMN IF NOT EXISTS reserved_qty integer NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS reserved_qty numeric(18,3) NOT NULL DEFAULT 0;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS average_cost numeric(18,2) NOT NULL DEFAULT 0;
-ALTER TABLE products ADD COLUMN IF NOT EXISTS reorder_quantity integer NOT NULL DEFAULT 0;
-ALTER TABLE products ADD COLUMN IF NOT EXISTS maximum_stock_level integer NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS reorder_quantity numeric(18,3) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS maximum_stock_level numeric(18,3) NOT NULL DEFAULT 0;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier text;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS batch_number text;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS manufacturing_date date;
@@ -310,7 +310,7 @@ CREATE TABLE IF NOT EXISTS sale_items (
   product_id uuid REFERENCES products(id) ON DELETE SET NULL,
   product_name text NOT NULL,
   department text,
-  qty integer NOT NULL DEFAULT 0,
+  qty numeric(18,3) NOT NULL DEFAULT 0,
   unit_price numeric(18,2) NOT NULL DEFAULT 0,
   discount numeric(18,2) NOT NULL DEFAULT 0,
   tax numeric(18,2) NOT NULL DEFAULT 0,
@@ -357,7 +357,7 @@ CREATE TABLE IF NOT EXISTS purchase_items (
   product_id uuid REFERENCES products(id) ON DELETE SET NULL,
   product_name text NOT NULL,
   department text,
-  qty integer NOT NULL DEFAULT 0,
+  qty numeric(18,3) NOT NULL DEFAULT 0,
   unit_price numeric(18,2) NOT NULL DEFAULT 0,
   discount numeric(18,2) NOT NULL DEFAULT 0,
   tax numeric(18,2) NOT NULL DEFAULT 0,
@@ -403,7 +403,7 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id uuid NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
   movement_date date NOT NULL,
-  quantity integer NOT NULL,
+  quantity numeric(18,3) NOT NULL,
   movement_type text NOT NULL CHECK (movement_type IN ('inbound', 'outbound', 'adjustment', 'transfer')),
   source text,
   destination text,
@@ -429,9 +429,9 @@ CREATE TABLE IF NOT EXISTS stock_counts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   count_date date NOT NULL,
   product_id uuid NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
-  book_stock integer NOT NULL DEFAULT 0,
-  physical_stock integer NOT NULL DEFAULT 0,
-  variance integer NOT NULL DEFAULT 0,
+  book_stock numeric(18,3) NOT NULL DEFAULT 0,
+  physical_stock numeric(18,3) NOT NULL DEFAULT 0,
+  variance numeric(18,3) NOT NULL DEFAULT 0,
   unit_cost numeric(18,2) NOT NULL DEFAULT 0,
   variance_value numeric(18,2) NOT NULL DEFAULT 0,
   reason text,
