@@ -7,11 +7,16 @@
     "build": "next build --webpack",
     "postbuild": "node scripts/copy-standalone-assets.mjs",
     "start": "node server.js",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "db:status": "node scripts/db-migrate.mjs status",
+    "db:migrate": "node scripts/db-migrate.mjs up",
+    "db:baseline": "node scripts/db-migrate.mjs baseline",
+    "db:new": "node scripts/db-migrate.mjs new"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
     "@supabase/supabase-js": "^2.111.0",
+    "@tailwindcss/postcss": "^4.3.3",
     "@vercel/analytics": "1.6.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -19,7 +24,6 @@
     "lucide-react": "^1.16.0",
     "mammoth": "^1.12.1",
     "next": "16.2.6",
-    "@tailwindcss/postcss": "^4.3.3",
     "postcss": "^8.5",
     "react": "^19",
     "react-dom": "^19",
@@ -33,6 +37,7 @@
     "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "pg": "^8.23.0",
     "typescript": "5.7.3"
   },
   "pnpm": {
