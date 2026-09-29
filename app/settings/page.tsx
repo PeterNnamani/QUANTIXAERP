@@ -7,7 +7,8 @@ import { useAccounting, type BankAccount, type CompanySettings, type UserSetting
 import { formatCurrency } from '@/lib/utils'
 import { canEditPermission, getDefaultRoles, saveRoles, type RoleDefinition, type PermissionKey } from '@/lib/rbac'
 import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipeConfirmationPhrase } from '@/lib/company-lifecycle'
-import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
+import { findImportedInventoryIndex, mergeImportedInventoryItem, mergeImportedStaff, mergeUniqueNames, parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
+import { generateSku } from '@/lib/sku'
 import { dedupeChartOfAccounts, requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
 
 const sidebarSections = [
@@ -234,42 +235,48 @@ export default function SettingsPage() {
       setImportStatus('success')
       setTimeout(() => setImportProgress(100), 200)
 
-      const nextCustomerList = Array.from(
-        new Set([
-          ...state.customerList,
-          ...(payload.contacts || []).filter((item: any) => item.type === 'customer').map((item: any) => String(item.name || '')),
-        ])
-      ).filter(Boolean)
-      const nextSupplierList = Array.from(
-        new Set([
-          ...state.supplierList,
-          ...(payload.contacts || []).filter((item: any) => item.type === 'supplier').map((item: any) => String(item.name || '')),
-        ])
-      ).filter(Boolean)
+      const nextCustomerList = mergeUniqueNames(
+        state.customerList,
+        (payload.contacts || []).filter((item: any) => item.type === 'customer').map((item: any) => String(item.name || '')),
+      )
+      const nextSupplierList = mergeUniqueNames(
+        state.supplierList,
+        (payload.contacts || []).filter((item: any) => item.type === 'supplier' || item.type === 'vendor').map((item: any) => String(item.name || '')),
+      )
 
-      const nextInventory = [
-        ...state.inventory,
-        ...(payload.products || []).map((product: any) => ({
+      const nextInventory = [...state.inventory]
+      ;(payload.products || []).forEach((product: any) => {
+        const imported = {
           product: String(product.name || product.sku || 'Imported Item'),
+          sku: String(product.sku || ''),
+          description: String(product.description || ''),
+          branch: String(product.branch || ''),
           dept: String(product.category || product.dept || 'General'),
           openQty: Number(product.stock_qty || product.openQty || product.closing || 0),
           purchased: Number(product.purchased || 0),
           sold: Number(product.sold || 0),
           unitCost: Number(product.unit_cost || product.unitCost || 0),
+          sellingPrice: Number(product.unit_price || product.sellingPrice || 0),
           closing: Number(product.stock_qty || product.closing || 0),
-        })),
-      ]
+        }
+        const index = findImportedInventoryIndex(nextInventory, product)
+        if (index >= 0) {
+          nextInventory[index] = mergeImportedInventoryItem(nextInventory[index], imported, product)
+        } else {
+          nextInventory.push({ ...imported, sku: product.skuGenerated ? generateSku(imported.product, nextInventory.map((item) => item.sku || '')) : imported.sku })
+        }
+      })
 
-      const nextStaff = [...state.staffMembers, ...(payload.staff || []).map((staff: any) => ({
+      const nextStaff = mergeImportedStaff(state.staffMembers, (payload.staff || []).map((staff: any) => ({
         id: staff.id || '',
         name: String(staff.name || staff.fullName || staff.full_name || 'Imported Staff'),
         staffId: String(staff.staffId || staff.employeeId || staff.employee_id || ''),
         pin: String(staff.pin || ''),
-        roleId: String(staff.roleId || staff.role_id || staff.role || 'staff'),
-        roleName: String(staff.roleName || staff.role_name || staff.role || 'Staff'),
+        roleId: String(staff.roleId || staff.role_id || staff.role || ''),
+        roleName: String(staff.roleName || staff.role_name || staff.role || ''),
         permissions: staff.permissions || ['dashboard'],
         dataScope: staff.dataScope || 'team',
-        status: staff.status || 'active',
+        status: staff.status || '',
         createdAt: String(staff.createdAt || staff.created_at || new Date().toISOString()),
         username: String(staff.username || ''),
         branch: String(staff.branch || ''),
@@ -277,7 +284,7 @@ export default function SettingsPage() {
         position: String(staff.position || ''),
         phone: String(staff.phone || ''),
         email: String(staff.email || ''),
-      }))]
+      })))
 
       updateState({
         sales: [...state.sales, ...((payload.sales || []) as any[])],

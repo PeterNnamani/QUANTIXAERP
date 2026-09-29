@@ -6,7 +6,7 @@ import BulkImport from '@/components/bulk-import'
 import { useAccounting } from '@/lib/context'
 import { formatCurrency, formatNumber, parseNumeric } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
-import { parseExcelFile } from '@/lib/import-utils'
+import { findImportedInventoryIndex, parseExcelFile } from '@/lib/import-utils'
 import { generateSku } from '@/lib/sku'
 import InventorySheetTable, { inventorySheetHeaders, type InventorySheet } from '@/components/inventory/inventory-sheet-table'
 
@@ -171,7 +171,7 @@ export default function ProductManagerPage() {
                 if (!product) {
                     return null
                 }
-                const dept = String(row['category'] || row['dept'] || row['department'] || 'Uncategorized').trim() || 'Uncategorized'
+                const dept = String(row['category'] || row['dept'] || row['department'] || row['sheetCategory'] || 'Uncategorized').trim() || 'Uncategorized'
                 const unitCost = parseNumeric(row['cost price'] || row['unit cost'] || row['unitcost'] || row['cost'] || 0)
                 const sellingPrice = parseNumeric(row['selling price'] || row['sellingprice'] || row['unit price'] || row['price'] || 0)
                 const closing = parseNumeric(row['items in stock'] || row['closing'] || row['stock'] || row['quantity'] || row['qty'] || 0)
@@ -210,9 +210,7 @@ export default function ProductManagerPage() {
         const mergedInventory = [...state.inventory]
 
         normalizedProducts.forEach((productItem) => {
-            const existingIndex = mergedInventory.findIndex(
-                (inventory) => inventory.product?.toLowerCase() === productItem.product.toLowerCase()
-            )
+            const existingIndex = findImportedInventoryIndex(mergedInventory, productItem)
             if (existingIndex >= 0) {
                 const existing = mergedInventory[existingIndex]
                 mergedInventory[existingIndex] = {
