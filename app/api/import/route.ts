@@ -457,6 +457,15 @@ async function insertExpenseRecords(expenses: any[], companyId: string): Promise
 }
 
 function formatErrorMessage(error: unknown): string {
+    const message = rawErrorMessage(error)
+    const decimal = message.match(/invalid input syntax for type integer: "?([^"]+)"?/i)
+    if (decimal) {
+        return `The database only accepts whole-number quantities, but the file contains ${decimal[1]}. Run migrations/030_decimal_inventory_quantities.sql in the Supabase SQL editor to allow decimal quantities, or round the quantity columns in your file.`
+    }
+    return message
+}
+
+function rawErrorMessage(error: unknown): string {
     if (!error) return 'Unknown server error'
     if (error instanceof Error) return error.message
     if (typeof error === 'string') return error
