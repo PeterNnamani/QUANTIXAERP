@@ -1,0 +1,1833 @@
+--- /dev/null
++++ b/ONBOARDING_FIXES.md
+@@ -0,0 +1,77 @@
++# QUANTIXA inventory and opening-balance fixes
++
++Prepared for Stephen's Lab — 3 October 2026.
++Based on the QUANTIXAERP.zip snapshot supplied for review. These are source changes, not a live deployment. The earlier authentication/security findings remain unresolved.
++
++## Apply before the onboarding
++
++1. Preserve your current work in Git and back up the database. Export any inventory that currently exists only in a browser: the old application could report a local save despite a database failure. The new loader treats successfully loaded database inventory as authoritative.
++2. Use a separate branch. The ZIP contains complete updated source and `ONBOARDING_FIXES.patch`. From your existing checkout, run `git apply --check /path/to/ONBOARDING_FIXES.patch`, then `git apply /path/to/ONBOARDING_FIXES.patch`. If the check fails, your checkout differs from the reviewed snapshot; merge the changes instead of forcing them. The patch includes the new migration and tests. The complete source is an alternative, not an additional step. Preserve your own environment files and Git history.
++3. Apply `migrations/030_inventory_onboarding_reliability.sql` using the Supabase SQL editor or your migration process. It expects the existing schema through migration 029. For a fresh database, apply `initial_schema.sql` first, then the numbered migrations in order. Migration 030 runs in a transaction, preserves existing quantities, and may be rerun. It does not install authentication or RLS policies.
++4. Use Node.js 24 for the supplied verification commands. Run:
++
++   npm ci
++   npm run test:inventory
++   npm run test:inventory-db
++   npm run build
++
++   The database test uses an isolated, in-memory PostgreSQL engine and does not connect to Supabase. The build must run with your existing deployment environment variables. It may need network access for the configured Google font.
++5. Deploy the source/build using your normal hosting workflow. No remote repository, hosting service, or live database was changed by this work.
++6. Complete the short acceptance check below against your actual configuration before the session.
++
++## Short acceptance check
++
++- Sign in to the correct test company.
++- From Inventory or Product Manager, use Bulk upload. Import a small file containing a quantity such as 12.75, a price such as 1250.50, and an explicit zero-stock row. Confirm the database-confirmed row count, then refresh and compare quantities and prices.
++- Import a file with more than 200 rows. Confirm the full product count after refresh. Files exceeding 1,000 rows were also covered by local parser/pagination tests.
++- Try a duplicated SKU and an invalid numeric cell. Both should identify the problem without silently dropping the row or claiming success.
++- Use Add Product with fractional stock and prices. Refresh and verify the values.
++- Select one product for Receive Stock, Stock Adjustment, or Stock Count. Check the resulting quantity, movement history, and refresh persistence. A zero physical count is permitted; receiving zero and withdrawing more than available stock are rejected.
++- Save fractional opening balances and dates under Settings > Opening Balances. Refresh and verify. Test opening capital and bank opening balances separately if using those screens.
++- Confirm that an unavailable database or denied write shows an error instead of a success notice. Database permissions in your deployment must allow the existing browser client to perform the required operations; these fixes do not bypass them.
++
++## Inventory import format
++
++Use CSV, XLS or XLSX, with headings on the first row of every data sheet. Each row must contain Product Name (Product, Item or Name is also recognized). Use text SKUs where leading zeros matter.
++
++Example headings and row:
++
++SKU,Product Name,Category,Opening Stock,Stock Qty,Unit Cost,Selling Price,Branch
++RICE-001,Rice,Food,12.75,12.75,1250.50,1500.75,Main Warehouse
++
++Optional fields include Purchased, Sold, Brand, Pack Size, Supplier, Reorder Level, Reorder Quantity and Expiry Date. Use YYYY-MM-DD for text dates; Excel date cells are supported. A period is the decimal separator; comma thousands separators are supported. In CSV, quote values containing commas.
++
++All worksheets are read. All rows are validated before one database upsert. Invalid rows and duplicate SKUs are reported; they are not silently deduplicated. Imported quantities replace the matching product's quantities, rather than adding them. Supplied zeros are preserved. Blank optional values preserve existing values where applicable. Stock quantities use six decimal places in the database; monetary columns retain the existing two-decimal scale.
++
++A supplied SKU identifies a product. If SKU is omitted and exactly one existing product has that name, its SKU is reused; otherwise a new SKU is generated. Ambiguous existing names require explicit SKUs. Different SKUs with identical names remain separate products. For today's inventory loading, use the dedicated Inventory/Product Manager importer; the older generic Settings importer is outside this fix.
++
++## What changed
++
++- Removed the 200-product reload cap and added complete, ordered pagination.
++- Replaced the inventory auto-classifier with a dedicated validated inventory importer on both inventory screens.
++- Preserved fractional quantities, prices, explicit zeros, multiple sheets, CSV leading-zero SKUs and expiry dates.
++- Replaced simulated import progress with a real saved-row confirmation.
++- Converted inventory quantity columns from integers to numeric values. Added persistent opening, purchased and sold quantities.
++- Scoped product SKUs and account codes to each company and updated inventory upsert targets.
++- Changed Add Product and inventory import to await database writes and report failure.
++- Replaced hard-coded stock mutations with explicit product/quantity/reason forms and a transactional database function that locks the selected product and writes its audit event.
++- Added stock-action history and recorded physical-count details. Connected inventory location/category/status filters and product brand/supplier/stock filters to displayed records.
++- Added visible Stock Qty to the product master table. Decimal values are no longer rounded to whole units for display.
++- Saved temporary opening-balance accounts with real UUIDs, remapped local account references and cleared drafts only after a successful database write.
++- Made opening-capital and bank settings saves await database confirmation. Changing a bank opening balance adjusts the draft available balance by the same difference, preserving its existing movement difference.
++- Gave the seeded Payables account code 2005 to avoid its collision with Accounts Payable (2000).
++
++## Scope limits
++
++Relocate Stock moves a product's WHOLE balance to one location without changing quantity. Partial transfers between separate warehouse balances are not implemented. Stock actions update physical inventory and audit history; they do not create supplier invoices or financial journal adjustments. Record the corresponding financial transaction where required, and do not record the same receipt twice through different workflows.
++
++These changes do not resolve the previously documented authentication, authorization, PIN handling, sales transaction consistency, or broader accounting/reporting problems. Browser access still depends on the project's existing Supabase permissions. Financial opening-balance persistence is fixed here; accounting sign-off and report reconciliation still require review.
++
++## Verification
++
++- 15 focused tests passed: 11 inventory/opening-balance tests and 4 real spreadsheet tests. These include a 1,201-row normalization test and a 1,202-product Excel workbook across two sheets.
++- The full SQL migration sequence applied successfully in an isolated PostgreSQL engine. Decimal stock, identical SKUs/codes in separate companies, receive/decrease/count/relocate actions, invalid-action rollback, opening-balance cents and migration reruns passed.
++- Production build passed using the repository's existing configuration. That configuration still ignores TypeScript build errors.
++- Comparing a strict TypeScript check against the untouched snapshot found no new diagnostic signatures. Existing project-wide errors remain.
++- Full test-file run: 15 passed, 1 failed. The existing tests/dummy-data.test.mjs dashboard source-text assertion also failed before these changes.
++- Live Supabase permissions, live persistence, deployment and a browser end-to-end session have not been verified. The acceptance check above is required on your configuration.
+--- a/app/inventory/page.tsx
++++ b/app/inventory/page.tsx
+@@ -2,20 +2,47 @@
+ 
+ import { useMemo, useState } from 'react'
+ import AppLayout from '@/components/layout/app-layout'
+-import BulkImport from '@/components/bulk-import'
++import InventoryImport from '@/components/inventory/inventory-import'
++import Modal from '@/components/ui/modal'
++import {getSupabaseClient} from '@/lib/supabase.browser'
+ import { useAccounting } from '@/lib/context'
+ import { formatCurrency, formatNumber, triggerAppToast } from '@/lib/utils'
+ import { downloadExcel } from '@/lib/export-utils'
+ import InventorySheetTable, { inventorySheetHeaders, type InventorySheet } from '@/components/inventory/inventory-sheet-table'
+ 
+ export default function InventoryPage() {
+-  const { state, updateState, deleteInventoryItems, addAuditLog } = useAccounting()
++  const { state, user, updateState, deleteInventoryItems, addAuditLog } = useAccounting()
+   const [search, setSearch] = useState('')
+-  const [selectedWarehouse, setSelectedWarehouse] = useState('Main Warehouse')
++  const [selectedWarehouse, setSelectedWarehouse] = useState('All Warehouses')
+   const [selectedCategory, setSelectedCategory] = useState('All Categories')
+   const [selectedStatus, setSelectedStatus] = useState('All Status')
+   const [selectedSheet, setSelectedSheet] = useState<InventorySheet>('product-master')
+   const [showFilters, setShowFilters] = useState(false)
++
++  const [action, setAction] = useState('')
++  const [actionSku, setActionSku] = useState('')
++  const [quantity, setQuantity] = useState('')
++  const [reason, setReason] = useState('')
++  const [destination, setDestination] = useState('')
++  const [busy, setBusy] = useState(false)
++  const [actionError, setActionError] = useState('')
++  const submitAction = async () => {
++    setActionError(''); setBusy(true)
++    try {
++      const client = getSupabaseClient()
++      if (!client || !user?.companyId) throw new Error('Sign in to a connected company.')
++      if (!actionSku || !reason.trim()) throw new Error('Select a product and enter a reason.')
++      const amount = Number(quantity)
++      if (action !== 'relocate' && (quantity.trim() === '' || !Number.isFinite(amount) || amount < 0 || (amount === 0 && action !== 'count'))) throw new Error('Enter a valid quantity.')
++      if (action === 'relocate' && !destination.trim()) throw new Error('Enter a destination.')
++      const {data, error} = await client.rpc('apply_inventory_action', {p_company_id: user.companyId, p_sku: actionSku, p_action: action, p_quantity: action === 'relocate' ? 0 : amount, p_reason: reason.trim(), p_location: destination.trim() || null})
++      if (error) throw new Error(error.message)
++      if (!data?.sku) throw new Error('The server did not confirm the stock change.')
++      updateState({inventory: state.inventory.map(item => item.sku === actionSku ? {...item, closing: Number(data.stock_qty), purchased: Number(data.purchased_qty), sold: Number(data.sold_qty), branch: data.branch || '', lastCountQty: data.last_count_qty, lastCountVariance: data.last_count_variance, lastCountAt: data.last_count_at, lastCountReason: data.last_count_reason} : item), auditLogs: [{id: data.audit_id, timestamp: new Date().toISOString(), action: action.toUpperCase(), type: 'INVENTORY', reference: actionSku, details: reason.trim(), user: user.name, metadata: {previous_quantity: Number(data.previous_quantity), quantity: Number(data.stock_qty), location: data.branch}}, ...state.auditLogs]}, {persist: false})
++      setAction(''); triggerAppToast('Inventory saved', 'The selected product was updated in the database.')
++    } catch(error) {setActionError(error instanceof Error ? error.message : 'Unable to save inventory.')}
++    finally {setBusy(false)}
++  }
+ 
+   const inventoryRows = useMemo(() => {
+     return state.inventory.map((item, index) => ({
+@@ -30,10 +57,10 @@
+       stockValue: item.closing * item.unitCost,
+       expiryDate: item.expiryDate || '',
+       damagedExpired: item.damagedExpired || 0,
+-      reorderLevel: Math.max(5, Math.floor((item.closing || 0) * 0.2)),
+-      reorderQuantity: Math.max(0, Math.floor(Math.max(5, Math.floor((item.closing || 0) * 0.2)) - (item.closing || 0))),
+-      status: item.closing <= 0 ? 'Out of Stock' : item.closing <= 10 ? 'Low Stock' : 'In Stock',
+-      warehouse: 'Main Warehouse',
++      reorderLevel: item.reorderLevel ?? 5,
++      reorderQuantity: item.reorderQuantity ?? Math.max(0, (item.reorderLevel ?? 5) - item.closing),
++      status: item.expiryDate && item.expiryDate < new Date().toISOString().slice(0,10) ? 'Expired' : (item.damagedExpired || 0) > 0 ? 'Damaged' : item.closing <= 0 ? 'Out of Stock' : item.closing <= (item.reorderLevel ?? 5) ? 'Low Stock' : 'In Stock',
++      warehouse: item.branch || 'Main Warehouse',
+     }))
+   }, [state.inventory])
+ 
+@@ -48,52 +75,14 @@
+     })
+   }, [inventoryRows, search, selectedCategory, selectedStatus, selectedWarehouse])
+ 
+-  const handleInventoryAction = (action: string) => {
+-    triggerAppToast(action, 'Inventory action queued and logged for the warehouse team.')
+-    if (action === 'Export Excel') {
++  const handleInventoryAction = (label: string) => {
++    if (label === 'Export Excel') {
+       downloadExcel('inventory-export.xlsx', filteredRows)
+       addAuditLog('EXPORT', 'INVENTORY', 'ALL', 'Inventory exported to Excel.')
+       return
+     }
+-
+-    if (action === '+ Stock Adjustment') {
+-      const updatedInventory = state.inventory.map((item) => ({ ...item, closing: Math.max(0, item.closing - 1) }))
+-      updateState({ inventory: updatedInventory })
+-      addAuditLog('UPDATE', 'INVENTORY', 'INV-ADJ', 'Stock adjustment recorded for the selected warehouse.')
+-      return
+-    }
+-
+-    if (action === '+ Stock Transfer') {
+-      const updatedInventory = state.inventory.map((item, index) =>
+-        index === 0
+-          ? { ...item, closing: Math.max(0, item.closing - 2), sold: item.sold + 2 }
+-          : item
+-      )
+-      updateState({ inventory: updatedInventory })
+-      addAuditLog('TRANSFER', 'INVENTORY', updatedInventory[0]?.product || 'INV-TRANSFER', 'Stock transfer processed for the selected item.')
+-      return
+-    }
+-
+-    if (action === '+ Receive Stock') {
+-      const updatedInventory = state.inventory.map((item, index) =>
+-        index === 0
+-          ? { ...item, closing: item.closing + 5, purchased: item.purchased + 5 }
+-          : item
+-      )
+-      updateState({ inventory: updatedInventory })
+-      addAuditLog('RECEIVE', 'INVENTORY', updatedInventory[0]?.product || 'INV-RECEIVE', 'Stock received and inventory levels updated.')
+-      return
+-    }
+-
+-    if (action === '+ Stock Count') {
+-      const updatedInventory = state.inventory.map((item) => ({
+-        ...item,
+-        closing: Math.max(0, item.openQty + item.purchased - item.sold),
+-      }))
+-      updateState({ inventory: updatedInventory })
+-      addAuditLog('COUNT', 'INVENTORY', 'STOCK-COUNT', 'Stock count reconciled for warehouse inventory.')
+-      return
+-    }
++    setAction(({'+ Stock Adjustment': 'increase', '+ Relocate Stock': 'relocate', '+ Receive Stock': 'receive', '+ Stock Count': 'count'} as Record<string,string>)[label] || '')
++    setActionSku(''); setQuantity(''); setReason(''); setDestination(''); setActionError('')
+   }
+ 
+   const summaryCards = [
+@@ -102,7 +91,7 @@
+     { label: 'Inventory Value', value: formatCurrency(inventoryRows.reduce((sum, row) => sum + row.stockValue, 0)), tone: 'info' },
+     { label: 'Low Stock Items', value: formatNumber(inventoryRows.filter((row) => row.status === 'Low Stock').length), tone: 'warning' },
+     { label: 'Out of Stock', value: formatNumber(inventoryRows.filter((row) => row.status === 'Out of Stock').length), tone: 'critical' },
+-    { label: 'Expiring Soon', value: formatNumber(inventoryRows.filter((row) => row.status === 'Expired').length), tone: 'warning' },
++    { label: 'Expiring Soon', value: formatNumber(inventoryRows.filter(row => row.expiryDate && row.expiryDate >= new Date().toISOString().slice(0,10) && row.expiryDate <= new Date(Date.now() + 30 * 86400000).toISOString().slice(0,10)).length), tone: 'warning' },
+   ]
+ 
+   return (
+@@ -114,9 +103,9 @@
+             <div className="pg-subtitle">Monitor stock levels, warehouse activities, inventory movements, and stock valuation.</div>
+           </div>
+           <div className="inventory-actions">
+-            <BulkImport label="Bulk upload" tableColumns={inventorySheetHeaders[selectedSheet]} />
++            <InventoryImport />
+             <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Stock Adjustment')}>+ Stock Adjustment</button>
+-            <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Stock Transfer')}>+ Stock Transfer</button>
++            <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Relocate Stock')}>+ Relocate Stock</button>
+             <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Receive Stock')}>+ Receive Stock</button>
+             <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Stock Count')}>+ Stock Count</button>
+             <button className="inventory-btn secondary" onClick={() => setShowFilters((prev) => !prev)}>{showFilters ? 'Hide Filters' : 'Show Filters'}</button>
+@@ -147,8 +136,8 @@
+                 <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by product, SKU, or category..." />
+               </div>
+               <div className="inventory-chip-row">
+-                <span className="inventory-chip success">Multi-warehouse</span>
+-                <span className="inventory-chip">Barcode ready</span>
++                <span className="inventory-chip success">Location tracking</span>
++                <span className="inventory-chip">Stock register</span>
+               </div>
+             </div>
+             <div className="inventory-filters-grid">
+@@ -156,11 +145,7 @@
+                 <span>Warehouse</span>
+                 <select value={selectedWarehouse} onChange={(e) => setSelectedWarehouse(e.target.value)}>
+                   <option>All Warehouses</option>
+-                  <option>Main Warehouse</option>
+-                  <option>Warehouse A</option>
+-                  <option>Warehouse B</option>
+-                  <option>Store Front</option>
+-                  <option>Production</option>
++                  {Array.from(new Set(inventoryRows.map(row => row.warehouse))).map(name => <option key={name}>{name}</option>)}
+                 </select>
+               </label>
+               <label>
+@@ -179,34 +164,28 @@
+                   <option>Out of Stock</option>
+                   <option>Expired</option>
+                   <option>Damaged</option>
+-                  <option>Reserved</option>
++
+                 </select>
+               </label>
+-              <label>
+-                <span>Supplier</span>
+-                <select defaultValue="All Suppliers">
+-                  <option>All Suppliers</option>
+-                  <option>Vinta Supplier</option>
+-                  <option>Local Vendor</option>
+-                </select>
+-              </label>
+-              <label>
+-                <span>Branch</span>
+-                <select defaultValue="All Branches">
+-                  <option>All Branches</option>
+-                  <option>Lagos</option>
+-                  <option>Abuja</option>
+-                  <option>Enugu</option>
+-                </select>
+-              </label>
++
+             </div>
+           </div>
+         )}
++
++        <Modal open={Boolean(action)} title="Update selected inventory" onClose={() => !busy && setAction('')}>
++          <div className="fg"><label>Product</label><select value={actionSku} disabled={busy} onChange={event => setActionSku(event.target.value)}><option value="">Select product</option>{state.inventory.map(item => <option key={item.sku} value={item.sku}>{item.product} ({item.sku}) — {item.closing} available</option>)}</select></div>
++          {(action === 'increase' || action === 'decrease') && <div className="fg"><label>Adjustment</label><select value={action} disabled={busy} onChange={event => setAction(event.target.value)}><option value="increase">Increase stock</option><option value="decrease">Decrease stock</option></select></div>}
++          {action === 'relocate' ? <><p>Move this product's entire stock to another location. Quantity stays unchanged. Partial warehouse transfers are not supported.</p><div className="fg"><label>Destination</label><input value={destination} disabled={busy} onChange={event => setDestination(event.target.value)}/></div></> : <div className="fg"><label>{action === 'count' ? 'Actual physical count' : 'Quantity'}</label><input type="number" min="0" step="any" value={quantity} disabled={busy} onChange={event => setQuantity(event.target.value)}/></div>}
++          <div className="fg"><label>Reason / reference</label><input value={reason} disabled={busy} onChange={event => setReason(event.target.value)}/></div>
++          <p>This updates physical stock. Record the related purchase or financial adjustment separately where required.</p>
++          {actionError && <p role="alert" className="staff-inline-notice error">{actionError}</p>}
++          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submitAction()}>{busy ? 'Saving…' : 'Save change'}</button>
++        </Modal>
+ 
+         <InventorySheetTable
+           sheet={selectedSheet}
+           onSheetChange={setSelectedSheet}
+-          inventory={state.inventory}
++          inventory={state.inventory.filter(item => filteredRows.some(row => row.sku === item.sku))}
+           purchases={state.purchases}
+           sales={state.sales}
+           auditLogs={state.auditLogs}
+@@ -220,6 +199,7 @@
+             } catch (error) {
+               console.error('Unable to delete inventory items', error)
+               triggerAppToast('Delete failed', 'Inventory could not be deleted from the database.')
++              throw error
+             }
+           }}
+         />
+--- a/app/product-manager/page.tsx
++++ b/app/product-manager/page.tsx
+@@ -1,28 +1,30 @@
+ 'use client'
+ 
+-import { useMemo, useState, type ChangeEvent } from 'react'
++import { useMemo, useState } from 'react'
+ import AppLayout from '@/components/layout/app-layout'
+-import BulkImport from '@/components/bulk-import'
++import InventoryImport from '@/components/inventory/inventory-import'
++import {saveInventoryRows} from '@/lib/inventory-workflows'
++import {getSupabaseClient} from '@/lib/supabase.browser'
+ import { useAccounting } from '@/lib/context'
+-import { formatCurrency, formatNumber, parseNumeric } from '@/lib/utils'
++import { formatCurrency, formatNumber } from '@/lib/utils'
+ import { downloadExcel } from '@/lib/export-utils'
+-import { parseExcelFile } from '@/lib/import-utils'
+ import { generateSku } from '@/lib/sku'
+ import InventorySheetTable, { inventorySheetHeaders, type InventorySheet } from '@/components/inventory/inventory-sheet-table'
+ 
+ export default function ProductManagerPage() {
+-    const { state, updateState, addAuditLog } = useAccounting()
++    const { state, user, updateState, addAuditLog } = useAccounting()
++    const [saving, setSaving] = useState(false)
++    const [saveError, setSaveError] = useState('')
+     const [search, setSearch] = useState('')
+     const [selectedCategory, setSelectedCategory] = useState('All Categories')
++    const [selectedBrand, setSelectedBrand] = useState('All Brands')
++    const [selectedSupplier, setSelectedSupplier] = useState('All Suppliers')
++    const [selectedStock, setSelectedStock] = useState('All')
+     const [selectedStatus, setSelectedStatus] = useState('Active')
+     const [selectedRow, setSelectedRow] = useState(0)
+     const [selectedSheet, setSelectedSheet] = useState<InventorySheet>('product-master')
+     const [showFilters, setShowFilters] = useState(false)
+     const [showProductForm, setShowProductForm] = useState(false)
+-    const [showImportModal, setShowImportModal] = useState(false)
+-    const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
+-    const [importFileName, setImportFileName] = useState('')
+-    const [importError, setImportError] = useState('')
+     const [productFormData, setProductFormData] = useState({
+         name: '',
+         sku: '',
+@@ -50,12 +52,12 @@
+                 description: item.description || '',
+                 branch: item.branch || '',
+                 category: item.dept || 'Uncategorized',
+-                brand: '—',
++                brand: item.brand || '—',
+                 costPrice: item.unitCost,
+                 sellingPrice: item.sellingPrice ?? item.unitCost,
+-                stockStatus: item.closing <= 0 ? 'Out of Stock' : item.closing <= 10 ? 'Low Stock' : 'In Stock',
+-                status: 'Active',
+-                supplier: '—',
++                stockStatus: item.closing <= 0 ? 'Out of Stock' : item.closing <= (item.reorderLevel ?? 5) ? 'Low Stock' : 'In Stock',
++                status: item.active === false ? 'Inactive' : 'Active',
++                supplier: item.supplier || '—',
+                 stock: item.closing,
+                 expiryDate: item.expiryDate || '',
+                 damagedExpired: item.damagedExpired || 0,
+@@ -69,9 +71,9 @@
+             const matchesQuery = !query || [product.name, product.sku, product.category, product.brand, product.supplier].join(' ').toLowerCase().includes(query)
+             const matchesCategory = selectedCategory === 'All Categories' || product.category === selectedCategory
+             const matchesStatus = selectedStatus === 'All Status' || product.status === selectedStatus
+-            return matchesQuery && matchesCategory && matchesStatus
++            return matchesQuery && matchesCategory && matchesStatus && (selectedBrand === 'All Brands' || product.brand === selectedBrand) && (selectedSupplier === 'All Suppliers' || product.supplier === selectedSupplier) && (selectedStock === 'All' || product.stockStatus === selectedStock)
+         })
+-    }, [products, search, selectedCategory, selectedStatus])
++    }, [products, search, selectedCategory, selectedStatus, selectedBrand, selectedSupplier, selectedStock])
+ 
+     const selectedProduct = filteredProducts[selectedRow] || filteredProducts[0]
+ 
+@@ -80,11 +82,12 @@
+         { label: 'Active Products', value: formatNumber(products.filter((product) => product.status === 'Active').length), tone: 'info' },
+         { label: 'Inactive Products', value: formatNumber(products.filter((product) => product.status === 'Inactive').length), tone: 'warning' },
+         { label: 'Categories', value: formatNumber(new Set(products.map((product) => product.category)).size), tone: 'info' },
+-        { label: 'Brands', value: formatNumber(new Set(products.map((product) => product.category)).size), tone: 'info' },
++        { label: 'Brands', value: formatNumber(new Set(products.map((product) => product.brand).filter(brand => brand !== '—')).size), tone: 'info' },
+         { label: 'Variants', value: formatNumber(products.length), tone: 'info' },
+     ]
+ 
+-    const handleSaveProduct = () => {
++    const handleSaveProduct = async () => {
++        setSaveError('')
+         if (!productFormData.name) {
+             alert('Product name is required.')
+             return
+@@ -92,10 +95,12 @@
+ 
+         const sku = productFormData.sku.trim() || generateSku(productFormData.name, state.inventory.map((item) => item.sku || ''))
+ 
++        if (state.inventory.some(item => item.sku?.toLowerCase() === sku.toLowerCase())) {setSaveError('This SKU already exists. Use bulk update by SKU.'); return}
+         const newInventoryItem = {
+             product: productFormData.name,
+             sku,
+             description: productFormData.description,
++            brand: productFormData.brand,
+             branch: productFormData.branch,
+             dept: productFormData.category || 'Uncategorized',
+             openQty: productFormData.stock,
+@@ -108,7 +113,13 @@
+             damagedExpired: productFormData.damagedExpired,
+         }
+ 
+-        updateState({ inventory: [...state.inventory, newInventoryItem] })
++        setSaving(true)
++        try {
++          await saveInventoryRows(getSupabaseClient(), user?.companyId || '', [newInventoryItem])
++        } catch(error) {
++          setSaveError(error instanceof Error ? error.message : 'Unable to save product.'); return
++        } finally {setSaving(false)}
++        updateState({ inventory: [...state.inventory, newInventoryItem] }, {persist: false})
+         addAuditLog('CREATE', 'PRODUCT', sku, `Product ${productFormData.name} added to catalog.`)
+         setShowProductForm(false)
+         setProductFormData({
+@@ -126,145 +137,9 @@
+         })
+     }
+ 
+-    const handleImportProducts = () => {
+-        setShowImportModal(true)
+-        setImportRows([])
+-        setImportFileName('')
+-        setImportError('')
+-    }
+-
+-    const handleProductFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+-        const file = event.target.files?.[0]
+-        if (!file) {
+-            return
+-        }
+-
+-        if (!file.name.match(/\.xls(x)?$/i)) {
+-            setImportError('Please upload an Excel file with .xlsx or .xls extension.')
+-            setImportRows([])
+-            setImportFileName('')
+-            return
+-        }
+-
+-        try {
+-            const rows = await parseExcelFile(file)
+-            if (rows.length === 0) {
+-                setImportError('The selected file contains no rows.')
+-                setImportRows([])
+-                setImportFileName(file.name)
+-                return
+-            }
+-            setImportRows(rows)
+-            setImportFileName(file.name)
+-            setImportError('')
+-        } catch (error) {
+-            setImportError('Unable to parse the Excel file. Please verify the file format.')
+-            setImportRows([])
+-            setImportFileName(file.name)
+-        }
+-    }
+-
+-    const processProductImport = () => {
+-        const normalizedProducts = importRows
+-            .map((row, index) => {
+-                const product = String(row['product'] || row['name'] || row['item'] || row['product name'] || '').trim()
+-                if (!product) {
+-                    return null
+-                }
+-                const dept = String(row['category'] || row['dept'] || row['department'] || 'Uncategorized').trim() || 'Uncategorized'
+-                const unitCost = parseNumeric(row['cost price'] || row['unit cost'] || row['unitcost'] || row['cost'] || 0)
+-                const sellingPrice = parseNumeric(row['selling price'] || row['sellingprice'] || row['unit price'] || row['price'] || 0)
+-                const closing = parseNumeric(row['items in stock'] || row['closing'] || row['stock'] || row['quantity'] || row['qty'] || 0)
+-                const openQty = parseNumeric(row['openqty'] || row['opening qty'] || row['openingquantity'] || row['opening stock'] || closing)
+-                const purchased = parseNumeric(row['purchased'] || row['purchase qty'] || 0)
+-                const sold = parseNumeric(row['sold'] || row['sold qty'] || 0)
+-                const expiryDate = String(row['expiry date'] || row['expirydate'] || row['expiry'] || '').trim()
+-                const damagedExpired = parseNumeric(row['damaged/expired'] || row['damaged expired'] || row['damagedexpired'] || 0)
+-                const sku = String(row['sku'] || row['product code'] || row['item code'] || '').trim()
+-                const description = String(row['description'] || row['product description'] || '').trim()
+-                const branch = String(row['branch'] || '').trim()
+-
+-                return {
+-                    product,
+-                    sku,
+-                    description,
+-                    branch,
+-                    dept,
+-                    openQty,
+-                    purchased,
+-                    sold,
+-                    unitCost,
+-                    sellingPrice,
+-                    closing,
+-                    expiryDate,
+-                    damagedExpired,
+-                }
+-            })
+-            .filter((item): item is { product: string; sku: string; description: string; branch: string; dept: string; openQty: number; purchased: number; sold: number; unitCost: number; sellingPrice: number; closing: number; expiryDate: string; damagedExpired: number } => item !== null)
+-
+-        if (normalizedProducts.length === 0) {
+-            setImportError('No valid product rows were found in the file.')
+-            return
+-        }
+-
+-        const mergedInventory = [...state.inventory]
+-
+-        normalizedProducts.forEach((productItem) => {
+-            const existingIndex = mergedInventory.findIndex(
+-                (inventory) => inventory.product?.toLowerCase() === productItem.product.toLowerCase()
+-            )
+-            if (existingIndex >= 0) {
+-                const existing = mergedInventory[existingIndex]
+-                mergedInventory[existingIndex] = {
+-                    ...existing,
+-                    sku: productItem.sku || existing.sku || generateSku(productItem.product, mergedInventory.map((item) => item.sku || '')),
+-                    description: productItem.description || existing.description,
+-                    branch: productItem.branch || existing.branch,
+-                    dept: productItem.dept || existing.dept,
+-                    openQty: productItem.openQty || existing.openQty,
+-                    purchased: (existing.purchased || 0) + productItem.purchased,
+-                    sold: (existing.sold || 0) + productItem.sold,
+-                    unitCost: productItem.unitCost || existing.unitCost,
+-                    sellingPrice: productItem.sellingPrice || existing.sellingPrice || productItem.unitCost || existing.unitCost,
+-                    closing: productItem.closing || existing.closing,
+-                    expiryDate: productItem.expiryDate || existing.expiryDate,
+-                    damagedExpired: productItem.damagedExpired || existing.damagedExpired,
+-                }
+-            } else {
+-                mergedInventory.push({
+-                    product: productItem.product,
+-                    sku: productItem.sku || generateSku(productItem.product, mergedInventory.map((item) => item.sku || '')),
+-                    description: productItem.description,
+-                    branch: productItem.branch,
+-                    dept: productItem.dept,
+-                    openQty: productItem.openQty,
+-                    purchased: productItem.purchased,
+-                    sold: productItem.sold,
+-                    unitCost: productItem.unitCost,
+-                    sellingPrice: productItem.sellingPrice || productItem.unitCost,
+-                    closing: productItem.closing,
+-                    expiryDate: productItem.expiryDate,
+-                    damagedExpired: productItem.damagedExpired,
+-                })
+-            }
+-        })
+-
+-        updateState({ inventory: mergedInventory })
+-        addAuditLog('IMPORT', 'PRODUCT', 'BULK', `Imported ${normalizedProducts.length} products from ${importFileName}`)
+-        setShowImportModal(false)
+-        setImportRows([])
+-        setImportFileName('')
+-        setImportError('')
+-    }
+-
+     const handleExportProducts = () => {
+         downloadExcel('products.xlsx', filteredProducts)
+         addAuditLog('EXPORT', 'PRODUCT', 'ALL', 'Exported products catalog.')
+-    }
+-
+-    const handleBulkUpdate = () => {
+-        addAuditLog('BULK_UPDATE', 'PRODUCT', 'ALL', 'Bulk product update applied.')
+-        alert('Bulk update has been scheduled for the current product selection.')
+     }
+ 
+     return (
+@@ -276,12 +151,12 @@
+                         <div className="pg-subtitle">Manage products, pricing, categories, variants, suppliers, and product settings.</div>
+                     </div>
+                     <div className="product-manager-actions">
+-                        <BulkImport label="Bulk upload" tableColumns={inventorySheetHeaders[selectedSheet]} />
++                        <InventoryImport />
+                         <button className="product-manager-btn secondary" type="button" onClick={() => setShowProductForm(true)}>+ Add Product</button>
+-                        <button className="product-manager-btn secondary" type="button" onClick={handleImportProducts}>Import Products</button>
++                        
+                         <button className="product-manager-btn secondary allow-readonly" type="button" onClick={handleExportProducts}>Export Products</button>
+                         <button className="product-manager-btn secondary" type="button" onClick={() => setShowFilters((prev) => !prev)}>{showFilters ? 'Hide Filters' : 'Show Filters'}</button>
+-                        <button className="product-manager-btn primary" type="button" onClick={handleBulkUpdate}>Bulk Update</button>
++                        <InventoryImport label="Bulk update by SKU" />
+                     </div>
+                 </div>
+ 
+@@ -330,15 +205,15 @@
+                             </div>
+                             <div className="fg">
+                                 <label>Cost Price</label>
+-                                <input type="number" min={0} value={productFormData.costPrice} onChange={(e) => setProductFormData({ ...productFormData, costPrice: parseFloat(e.target.value) || 0 })} />
++                                <input type="number" min={0} step="any" value={productFormData.costPrice} onChange={(e) => setProductFormData({ ...productFormData, costPrice: parseFloat(e.target.value) || 0 })} />
+                             </div>
+                             <div className="fg">
+                                 <label>Selling Price</label>
+-                                <input type="number" min={0} value={productFormData.sellingPrice} onChange={(e) => setProductFormData({ ...productFormData, sellingPrice: parseFloat(e.target.value) || 0 })} />
++                                <input type="number" min={0} step="any" value={productFormData.sellingPrice} onChange={(e) => setProductFormData({ ...productFormData, sellingPrice: parseFloat(e.target.value) || 0 })} />
+                             </div>
+                             <div className="fg">
+                                 <label>Stock</label>
+-                                <input type="number" min={0} value={productFormData.stock} onChange={(e) => setProductFormData({ ...productFormData, stock: parseInt(e.target.value, 10) || 0 })} />
++                                <input type="number" min={0} step="any" value={productFormData.stock} onChange={(e) => setProductFormData({ ...productFormData, stock: parseFloat(e.target.value) || 0 })} />
+                             </div>
+                             <div className="fg">
+                                 <label>Expiry Date</label>
+@@ -346,11 +221,11 @@
+                             </div>
+                             <div className="fg">
+                                 <label>Damaged/Expired</label>
+-                                <input type="number" min={0} value={productFormData.damagedExpired} onChange={(e) => setProductFormData({ ...productFormData, damagedExpired: parseInt(e.target.value, 10) || 0 })} />
++                                <input type="number" min={0} step="any" value={productFormData.damagedExpired} onChange={(e) => setProductFormData({ ...productFormData, damagedExpired: parseFloat(e.target.value) || 0 })} />
+                             </div>
+                         </div>
+                         <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+-                            <button className="btn btn-primary" type="button" onClick={handleSaveProduct}>Save Product</button>
++                            <button className="btn btn-primary" type="button" disabled={saving} onClick={() => void handleSaveProduct()}>{saving ? 'Saving…' : 'Save Product'}</button>{saveError && <p role="alert">{saveError}</p>}
+                             <button className="btn btn-secondary" type="button" onClick={() => setShowProductForm(false)}>Cancel</button>
+                         </div>
+                     </div>
+@@ -383,14 +258,14 @@
+                             </label>
+                             <label>
+                                 <span>Brand</span>
+-                                <select defaultValue="All Brands">
++                                <select value={selectedBrand} onChange={event => setSelectedBrand(event.target.value)}>
+                                     <option>All Brands</option>
+                                     {Array.from(new Set(products.map((product) => product.brand).filter(Boolean))).map((option) => <option key={option} value={option}>{option}</option>)}
+                                 </select>
+                             </label>
+                             <label>
+                                 <span>Supplier</span>
+-                                <select defaultValue="All Suppliers">
++                                <select value={selectedSupplier} onChange={event => setSelectedSupplier(event.target.value)}>
+                                     <option>All Suppliers</option>
+                                     {Array.from(new Set(products.map((product) => product.supplier).filter(Boolean))).map((option) => <option key={option} value={option}>{option}</option>)}
+                                 </select>
+@@ -402,14 +277,8 @@
+                                 </select>
+                             </label>
+                             <label>
+-                                <span>Tax Class</span>
+-                                <select defaultValue="All">
+-                                    <option>All</option><option>VAT</option><option>Exempt</option>
+-                                </select>
+-                            </label>
+-                            <label>
+                                 <span>Stock Status</span>
+-                                <select defaultValue="All">
++                                <select value={selectedStock} onChange={event => setSelectedStock(event.target.value)}>
+                                     <option>All</option><option>In Stock</option><option>Low Stock</option><option>Out of Stock</option>
+                                 </select>
+                             </label>
+@@ -420,7 +289,7 @@
+                 <InventorySheetTable
+                     sheet={selectedSheet}
+                     onSheetChange={setSelectedSheet}
+-                    inventory={state.inventory}
++                    inventory={state.inventory.filter(item => filteredProducts.some(product => product.sku === item.sku))}
+                     purchases={state.purchases}
+                     sales={state.sales}
+                     auditLogs={state.auditLogs}
+@@ -513,36 +382,6 @@
+                     </div>
+                 </div>
+             </div>
+-            {showImportModal && (
+-                <div className="modal-overlay">
+-                    <div className="modal-card">
+-                        <div className="card-hd">
+-                            <div>
+-                                <div className="card-title">Import Products</div>
+-                                <div className="section-subtitle">Upload an Excel file to seed your product catalog and inventory.</div>
+-                            </div>
+-                            <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowImportModal(false)}>Close</button>
+-                        </div>
+-                        <div className="form-grid" style={{ gap: '16px' }}>
+-                            <div className="fg">
+-                                <label>Excel file</label>
+-                                <input type="file" accept=".xlsx,.xls" onChange={handleProductFileChange} />
+-                            </div>
+-                            {importFileName && <div className="import-summary">Selected file: {importFileName}</div>}
+-                            {importError && <div className="error-text">{importError}</div>}
+-                            {importRows.length > 0 && (
+-                                <div className="import-summary">
+-                                    {importRows.length} rows ready to import.
+-                                </div>
+-                            )}
+-                        </div>
+-                        <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+-                            <button className="btn btn-primary" type="button" disabled={importRows.length === 0} onClick={processProductImport}>Import {importRows.length} rows</button>
+-                            <button className="btn btn-secondary" type="button" onClick={() => setShowImportModal(false)}>Cancel</button>
+-                        </div>
+-                    </div>
+-                </div>
+-            )}
+         </AppLayout>
+     )
+ }
+--- a/app/settings/page.tsx
++++ b/app/settings/page.tsx
+@@ -1,6 +1,9 @@
+ 'use client'
+ 
+ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
++import {saveOpeningBalances} from '@/lib/opening-balances'
++import {saveBankSettings} from '@/lib/bank-settings'
++import {getSupabaseClient} from '@/lib/supabase.browser'
+ import AppLayout from '@/components/layout/app-layout'
+ import BulkImport from '@/components/bulk-import'
+ import { useAccounting, type BankAccount, type CompanySettings, type UserSettings } from '@/lib/context'
+@@ -31,7 +34,10 @@
+   const [userSettings, setUserSettings] = useState<UserSettings>({ ...defaultUserSettings, ...(user?.userSettings || {}), notifications: { ...defaultUserSettings.notifications, ...(user?.userSettings?.notifications || {}) } })
+   const [userSettingsStatus, setUserSettingsStatus] = useState<{ tone: 'error' | 'success'; message: string } | null>(null)
+   const companySettings = state.companySettings
++  const [openingBusy, setOpeningBusy] = useState(false)
++  const [bankBusy, setBankBusy] = useState(false)
+   const [openingCapital, setOpeningCapital] = useState(state.openingCapital)
++  useEffect(() => { setOpeningCapital(state.openingCapital) }, [state.openingCapital])
+   const [openingBalanceDrafts, setOpeningBalanceDrafts] = useState<Record<string, number>>({})
+   const [openingDateDrafts, setOpeningDateDrafts] = useState<Record<string, string>>({})
+   const [activeSection, setActiveSection] = useState('security')
+@@ -93,10 +99,20 @@
+     updateCompanySettings({ [section]: { ...companySettings[section], ...updates } } as Pick<CompanySettings, K>)
+   }
+ 
+-  const handleSaveOpeningCapital = () => {
+-    const value = parseFloat(openingCapital as any) || 0
+-    updateState({ openingCapital: value, companySettings: { ...companySettings, openingCapital: value } })
+-    setSettingsNotice({ tone: 'success', message: 'Opening capital saved.' })
++  const handleSaveOpeningCapital = async () => {
++    setOpeningBusy(true); setSettingsNotice(null)
++    try {
++      const value = Number(openingCapital)
++      if (!Number.isFinite(value) || value < 0) throw new Error('Enter a valid opening capital.')
++      const client = getSupabaseClient()
++      if (!client || !user?.companyId) throw new Error('Sign in to a connected company.')
++      const settings = {...companySettings, openingCapital: value}
++      const {error} = await client.from('companies').update({settings}).eq('id', user.companyId).select('id').single()
++      if (error) throw new Error(error.message)
++      updateState({openingCapital: value, companySettings: settings}, {persist: false})
++      setSettingsNotice({tone: 'success', message: 'Opening capital saved to the database.'})
++    } catch(error) {setSettingsNotice({tone: 'error', message: error instanceof Error ? error.message : 'Save failed.'})}
++    finally {setOpeningBusy(false)}
+   }
+ 
+   const financialPositionAccounts = useMemo(() => {
+@@ -104,7 +120,9 @@
+     return dedupeChartOfAccounts([...state.chartOfAccounts, ...missingAccounts]).filter((account) => ['ASSET', 'LIABILITY', 'EQUITY'].includes(account.accountType))
+   }, [state.chartOfAccounts])
+ 
+-  const handleSaveOpeningBalances = () => {
++  const handleSaveOpeningBalances = async () => {
++    setOpeningBusy(true); setSettingsNotice(null)
++    try {
+     const mergedChartOfAccounts = dedupeChartOfAccounts([
+       ...state.chartOfAccounts,
+       ...requiredFinancialPositionAccounts.map((account) => ({ ...account, openingBalance: 0, openingBalanceDate: null })),
+@@ -116,9 +134,13 @@
+         openingBalanceDate: openingDateDrafts[account.id] ?? account.openingBalanceDate ?? null,
+       }
+     })
+-    updateState({ chartOfAccounts: mergedChartOfAccounts })
++    const result = await saveOpeningBalances(getSupabaseClient(), user?.companyId || '', mergedChartOfAccounts)
++    updateState({chartOfAccounts: result.accounts, journalLines: state.journalLines.map(line => ({...line, accountId: result.ids[line.accountId] || line.accountId}))}, {persist: false})
++    setOpeningBalanceDrafts({}); setOpeningDateDrafts({})
+     addAuditLog('UPDATE', 'ACCOUNTING', 'OPENING_BALANCES', 'Financial-position opening balances updated.')
+-    setSettingsNotice({ tone: 'success', message: 'Opening balances saved.' })
++    setSettingsNotice({ tone: 'success', message: 'Opening balances saved to the database.' })
++    } catch(error) {setSettingsNotice({tone: 'error', message: error instanceof Error ? error.message : 'Save failed.'})}
++    finally {setOpeningBusy(false)}
+   }
+ 
+   const openImportModal = () => {
+@@ -392,7 +414,7 @@
+     }
+   }
+ 
+-  const handleCreateBank = () => {
++  const handleCreateBank = async () => {
+     const institution = newBankName.trim()
+     const accountName = newBankAccountName.trim()
+     if (!institution || !accountName) {
+@@ -410,7 +432,11 @@
+       currency: newBankCurrency, branch: '', openingBalance: newBankOpeningBalance,
+       openingBalanceDate: newBankOpeningDate, balance: newBankOpeningBalance, status: 'active',
+     }
+-    updateState({ banks: { ...state.banks, [account.name]: account.balance }, bankAccounts: [...state.bankAccounts, account] })
++    setBankBusy(true)
++    try {await saveBankSettings(getSupabaseClient(), user?.companyId || '', account)}
++    catch(error) {setBankCreationStatus(error instanceof Error ? error.message : 'Unable to save bank.'); return}
++    finally {setBankBusy(false)}
++    updateState({ banks: { ...state.banks, [account.name]: account.balance }, bankAccounts: [...state.bankAccounts, account] }, {persist: false})
+     addAuditLog('CREATE', 'BANK', accountKey, `Created ${newBankAccountType.toLowerCase()} bank account.`)
+     setNewBankName(''); setNewBankAccountName(''); setNewBankAccountNumber(''); setNewBankAccountType('Current')
+     setNewBankCurrency('NGN'); setNewBankOpeningBalance(0); setNewBankOpeningDate(new Date().toISOString().slice(0, 10))
+@@ -435,7 +461,7 @@
+     })
+   }
+ 
+-  const handleSaveBank = () => {
++  const handleSaveBank = async () => {
+     const original = state.bankAccounts.find((account) => account.id === editingBankId)
+     if (!original) return
+     const institution = bankDraft.institution.trim()
+@@ -463,6 +489,10 @@
+       balance: bankDraft.balance,
+       status: bankDraft.status,
+     }
++    setBankBusy(true)
++    try {await saveBankSettings(getSupabaseClient(), user?.companyId || '', updated)}
++    catch(error) {setBankEditStatus(error instanceof Error ? error.message : 'Unable to save bank.'); return}
++    finally {setBankBusy(false)}
+     const banks = { ...state.banks }
+     delete banks[original.name]
+     banks[accountKey] = updated.balance
+@@ -470,7 +500,7 @@
+       banks,
+       bankAccounts: state.bankAccounts.map((account) => (account.id === original.id ? updated : account)),
+       ...(renamed ? { bankTxns: state.bankTxns.map((txn) => (txn.bank === original.name ? { ...txn, bank: accountKey } : txn)) } : {}),
+-    })
++    }, {persist: false})
+     addAuditLog('UPDATE', 'BANK', accountKey, renamed ? `Updated bank account details (renamed from ${original.name}).` : 'Updated bank account details.')
+     setEditingBankId(null)
+     setBankCreationStatus(`${accountKey} was updated. Bank Balances now shows the new details.`)
+@@ -591,8 +621,8 @@
+                   <div className="fg">
+                     <label>Opening balance / capital</label>
+                     <div className="inline-actions">
+-                      <input type="number" value={openingCapital} onChange={(e) => setOpeningCapital(parseFloat(e.target.value) || 0)} />
+-                      <button className="action-btn primary" onClick={handleSaveOpeningCapital}>Save</button>
++                      <input type="number" step="0.01" min={0} value={openingCapital} onChange={(e) => setOpeningCapital(parseFloat(e.target.value) || 0)} />
++                      <button className="action-btn primary" disabled={openingBusy} onClick={() => void handleSaveOpeningCapital()}>{openingBusy ? 'Saving…' : 'Save'}</button>
+                     </div>
+                     <div className="metric-note">Current: {formatCurrency(state.openingCapital)}</div>
+                   </div>
+@@ -608,7 +638,7 @@
+                     <div className="panel-title">Financial-position opening balances</div>
+                     <div className="panel-subtitle">Enter the balances brought forward for every asset, liability, and equity account.</div>
+                   </div>
+-                  <button className="action-btn primary" type="button" onClick={handleSaveOpeningBalances}>Save opening balances</button>
++                  <button className="action-btn primary" type="button" disabled={openingBusy} onClick={() => void handleSaveOpeningBalances()}>{openingBusy ? 'Saving…' : 'Save opening balances'}</button>
+                 </div>
+                 {settingsNotice && <div className={`staff-inline-notice ${settingsNotice.tone}`}>{settingsNotice.message}</div>}
+                 <div className="bank-account-register">
+@@ -691,7 +721,7 @@
+                   <div className="fg"><label>Opening balance date</label><input type="date" value={newBankOpeningDate} onChange={(event) => setNewBankOpeningDate(event.target.value)} /></div>
+                 </div>
+                 {bankCreationStatus && <div className="metric-note">{bankCreationStatus}</div>}
+-                <button className="action-btn primary" type="button" onClick={handleCreateBank}>Create bank account</button>
++                <button className="action-btn primary" type="button" disabled={bankBusy} onClick={() => void handleCreateBank()}>Create bank account</button>
+                 <div className="bank-account-register settings-bank-register">
+                   <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening balance</span><span>Status</span><span /></div>
+                   {state.bankAccounts.map((account) => (
+@@ -706,14 +736,14 @@
+                             <div className="fg"><label>Account type</label><select value={bankDraft.accountType} onChange={(event) => setBankDraft({ ...bankDraft, accountType: event.target.value })}>{['Current', 'Savings', 'Cash', 'Wallet', 'Other', ...(['Current', 'Savings', 'Cash', 'Wallet', 'Other'].includes(bankDraft.accountType) ? [] : [bankDraft.accountType])].map((type) => <option key={type}>{type}</option>)}</select></div>
+                             <div className="fg"><label>Currency</label><select value={bankDraft.currency} onChange={(event) => setBankDraft({ ...bankDraft, currency: event.target.value })}>{['NGN', 'USD', 'GBP', ...(['NGN', 'USD', 'GBP'].includes(bankDraft.currency) ? [] : [bankDraft.currency])].map((currency) => <option key={currency}>{currency}</option>)}</select></div>
+                             <div className="fg"><label>Branch <small>(optional)</small></label><input value={bankDraft.branch} onChange={(event) => setBankDraft({ ...bankDraft, branch: event.target.value })} /></div>
+-                            <div className="fg"><label>Opening balance</label><input type="number" min={0} step="0.01" value={bankDraft.openingBalance} onChange={(event) => setBankDraft({ ...bankDraft, openingBalance: Number(event.target.value || 0) })} /></div>
++                            <div className="fg"><label>Opening balance</label><input type="number" min={0} step="0.01" value={bankDraft.openingBalance} onChange={(event) => setBankDraft({ ...bankDraft, openingBalance: Number(event.target.value || 0), balance: bankDraft.balance + Number(event.target.value || 0) - bankDraft.openingBalance })} /></div>
+                             <div className="fg"><label>Opening balance date</label><input type="date" value={bankDraft.openingBalanceDate} onChange={(event) => setBankDraft({ ...bankDraft, openingBalanceDate: event.target.value })} /></div>
+                             <div className="fg"><label>Available balance</label><input type="number" min={0} step="0.01" value={bankDraft.balance} onChange={(event) => setBankDraft({ ...bankDraft, balance: Number(event.target.value || 0) })} /></div>
+                             <div className="fg"><label>Status</label><select value={bankDraft.status} onChange={(event) => setBankDraft({ ...bankDraft, status: event.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
+                           </div>
+                           {bankEditStatus && <div className="metric-note">{bankEditStatus}</div>}
+                           <div className="bank-edit-actions">
+-                            <button className="action-btn primary" type="button" onClick={handleSaveBank}>Save changes</button>
++                            <button className="action-btn primary" type="button" disabled={bankBusy} onClick={() => void handleSaveBank()}>Save changes</button>
+                             <button className="action-btn secondary" type="button" onClick={() => setEditingBankId(null)}>Cancel</button>
+                           </div>
+                         </div>
+--- /dev/null
++++ b/components/inventory/inventory-import.tsx
+@@ -0,0 +1,58 @@
++'use client'
++import {useState, type ChangeEvent} from 'react'
++import {useAccounting} from '@/lib/context'
++import {getSupabaseClient} from '@/lib/supabase.browser'
++import {parseSpreadsheetFile} from '@/lib/import-utils'
++import {prepareInventoryRows, saveInventoryRows} from '@/lib/inventory-workflows'
++import Modal from '@/components/ui/modal'
++
++export default function InventoryImport({label = 'Bulk upload'}: {label?: string}) {
++    const {state, user, updateState, addAuditLog} = useAccounting()
++    const [open,setOpen] = useState(false)
++    const [rows,setRows] = useState<Record<string,unknown>[]>([])
++    const [error,setError] = useState('')
++    const [message,setMessage] = useState('')
++    const [busy,setBusy] = useState(false)
++    const [fileName,setFileName] = useState('')
++    const read = async (event: ChangeEvent<HTMLInputElement>) => {
++        const file = event.target.files?.[0]; if (!file) return
++        setRows([]); setError(''); setMessage(''); setBusy(true); setFileName(file.name)
++        try {
++            const parsed = await parseSpreadsheetFile(file)
++            if (!parsed.length) throw new Error('No rows found. Put column headings on the first row.')
++            prepareInventoryRows(parsed, state.inventory)
++            setRows(parsed)
++        } catch(error) {setError(error instanceof Error ? error.message : 'Unable to read file.')}
++        finally {setBusy(false)}
++    }
++    const save = async () => {
++        setBusy(true); setError(''); setMessage('')
++        try {
++            const items = prepareInventoryRows(rows, state.inventory)
++            await saveInventoryRows(getSupabaseClient(), user?.companyId || '', items)
++            const imported = new Map(items.map(item => [item.sku, item]))
++            const merged = state.inventory.map(item => imported.get(item.sku) || item)
++            const existing = new Set(state.inventory.map(item => item.sku))
++            merged.push(...items.filter(item => !existing.has(item.sku)))
++            updateState({inventory: merged}, {persist: false})
++            addAuditLog('IMPORT','INVENTORY',fileName,`${items.length} inventory rows saved.`)
++            setMessage(`${items.length} of ${rows.length} rows saved to the database.`)
++            setRows([])
++        } catch(error) {setError(error instanceof Error ? error.message : 'Save failed. Please retry.')}
++        finally {setBusy(false)}
++    }
++    return <>
++        <button type="button" className="btn btn-secondary" onClick={() => {setOpen(true);setRows([]);setError('');setMessage('');setFileName('')}}>{label}</button>
++        <Modal open={open} title="Import inventory" onClose={() => !busy && setOpen(false)}>
++            <p>Upload CSV or Excel. Each row must have Product Name. Use a unique SKU to update an existing product. Decimal quantities and prices are supported.</p>
++            <p>Supported columns: SKU, Product Name, Category, Opening Stock, Stock Qty, Purchased, Sold, Unit Cost, Selling Price, Brand, Pack Size, Branch, Reorder Level, Expiry Date (YYYY-MM-DD).</p>
++            <p>All rows are validated before saving. Duplicate SKUs and invalid values are reported; they are not silently skipped. Imported quantities replace existing quantities.</p>
++            <input type="file" accept=".csv,.xls,.xlsx" disabled={busy} onChange={read}/>
++            <p>{fileName}{rows.length ? ` — ${rows.length} valid rows ready` : ''}</p>
++            {error && <div role="alert" className="staff-inline-notice error">{error}</div>}
++            {message && <div role="status" className="staff-inline-notice success">{message}</div>}
++            <button type="button" className="btn btn-primary" disabled={busy || !rows.length} onClick={() => void save()}>{busy ? 'Working…' : `Save ${rows.length} rows`}</button>
++            <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setOpen(false)}>Close</button>
++        </Modal>
++    </>
++}
+--- a/components/inventory/inventory-sheet-table.tsx
++++ b/components/inventory/inventory-sheet-table.tsx
+@@ -8,7 +8,7 @@
+ export type InventorySheet = 'product-master' | 'stock-movement' | 'stock-count' | 'inventory-dashboard'
+ 
+ export const inventorySheetHeaders: Record<InventorySheet, string[]> = {
+-    'product-master': ['SKU', 'Product Name', 'Brand', 'Category', 'Pack Size', 'Unit Cost', 'Selling Price', 'Reorder Level', 'Reorder Quantity', 'Stock Status'],
++    'product-master': ['SKU', 'Product Name', 'Brand', 'Category', 'Pack Size', 'Stock Qty', 'Unit Cost', 'Selling Price', 'Reorder Level', 'Reorder Quantity', 'Stock Status'],
+     'stock-movement': ['Date', 'Reference No.', 'SKU', 'Product Name', 'Transaction Type', 'Quantity In', 'Quantity Out', 'Location', 'Staff/Rep', 'Remarks'],
+     'stock-count': ['Date', 'SKU', 'Product Name', 'Book Stock', 'Physical Stock', 'Variance', 'Unit Cost', 'Variance Value', 'Reason', 'Verified By'],
+     'inventory-dashboard': ['Metric', 'Value'],
+@@ -64,27 +64,31 @@
+         const allVisibleSelected = visibleSkus.length > 0 && selectedVisibleCount === visibleSkus.length
+         const deleteRows = async (skus: string[]) => {
+             if (!onDeleteInventoryItems || skus.length === 0 || !window.confirm(`Delete ${skus.length} inventory item${skus.length === 1 ? '' : 's'}?`)) return
+-            await onDeleteInventoryItems(skus)
++            try {await onDeleteInventoryItems(skus)} catch {return}
+             setSelectedSkus((current) => current.filter((sku) => !skus.includes(sku)))
+         }
+-        return <SheetFrame title="Product Master" count={rows.length} sheet={sheet} onSheetChange={onSheetChange} headers={inventorySheetHeaders['product-master']} actions={onDeleteInventoryItems ? <div className="inventory-selection-actions"><label><input type="checkbox" checked={allVisibleSelected} onChange={(event) => setSelectedSkus(event.target.checked ? Array.from(new Set([...selectedSkus, ...visibleSkus])) : selectedSkus.filter((sku) => !visibleSkus.includes(sku)))} /> Select all</label><button type="button" className="inventory-btn secondary" disabled={selectedVisibleCount === 0} onClick={() => deleteRows(visibleSkus.filter((sku) => selectedSkus.includes(sku)))}>Delete selected</button><button type="button" className="inventory-btn danger" disabled={products.length === 0} onClick={() => deleteRows(products.map((item) => item.rowId))}>Delete all</button></div> : undefined}>
+-            {rows.map((item) => <tr key={item.rowId}><td><input type="checkbox" aria-label={`Select ${item.product}`} checked={selectedSkus.includes(item.rowId)} onChange={(event) => setSelectedSkus((current) => event.target.checked ? [...current, item.rowId] : current.filter((sku) => sku !== item.rowId))} /> {item.rowId}</td><td>{item.product}</td><td>{item.brand}</td><td>{item.dept || '-'}</td><td>{item.packSize}</td><td>{formatCurrency(item.unitCost)}</td><td>{formatCurrency(item.sellingPrice ?? item.unitCost * 1.35)}</td><td>{item.reorderLevel}</td><td>{item.reorderQuantity}</td><td><StockStatus value={getStockStatus(item)} /></td></tr>)}
++        return <SheetFrame title="Product Master" count={rows.length} sheet={sheet} onSheetChange={onSheetChange} headers={inventorySheetHeaders['product-master']} actions={onDeleteInventoryItems ? <div className="inventory-selection-actions"><label><input type="checkbox" checked={allVisibleSelected} onChange={(event) => setSelectedSkus(event.target.checked ? Array.from(new Set([...selectedSkus, ...visibleSkus])) : selectedSkus.filter((sku) => !visibleSkus.includes(sku)))} /> Select all</label><button type="button" className="inventory-btn secondary" disabled={selectedVisibleCount === 0} onClick={() => deleteRows(visibleSkus.filter((sku) => selectedSkus.includes(sku)))}>Delete selected</button><button type="button" className="inventory-btn danger" disabled={products.length === 0} onClick={() => deleteRows(products.map((item) => item.rowId))}>Delete all shown</button></div> : undefined}>
++            {rows.map((item) => <tr key={item.rowId}><td><input type="checkbox" aria-label={`Select ${item.product}`} checked={selectedSkus.includes(item.rowId)} onChange={(event) => setSelectedSkus((current) => event.target.checked ? [...current, item.rowId] : current.filter((sku) => sku !== item.rowId))} /> {item.rowId}</td><td>{item.product}</td><td>{item.brand}</td><td>{item.dept || '-'}</td><td>{item.packSize}</td><td>{formatNumber(item.closing)}</td><td>{formatCurrency(item.unitCost)}</td><td>{formatCurrency(item.sellingPrice ?? item.unitCost * 1.35)}</td><td>{item.reorderLevel}</td><td>{item.reorderQuantity}</td><td><StockStatus value={getStockStatus(item)} /></td></tr>)}
+         </SheetFrame>
+     }
+ 
+     if (sheet === 'stock-movement') {
+         const purchaseRows = purchases.map((purchase) => ({ date: purchase.date, reference: purchase.invoiceNumber || purchase.id, sku: purchase.items?.[0]?.sku || '-', product: purchase.product, type: 'Purchase', in: purchase.qty, out: 0, location: purchase.branch || purchase.warehouse || '-', staff: purchase.enteredBy, remarks: purchase.notes }))
+         const saleRows = sales.flatMap((sale) => sale.items.map((item) => ({ date: sale.date, reference: sale.id, sku: '-', product: item.product, type: 'Sale', in: 0, out: item.qty, location: '-', staff: sale.enteredBy, remarks: sale.notes })))
+-        const rows = [...purchaseRows, ...saleRows].filter((row) => matches([row.reference, row.sku, row.product, row.type, row.location, row.staff, row.remarks])).sort((a, b) => b.date.localeCompare(a.date))
++        const actionRows = auditLogs.filter(log => log.type === 'INVENTORY' && ['RECEIVE','INCREASE','DECREASE','COUNT','RELOCATE'].includes(log.action) && log.metadata?.quantity !== undefined).map(log => {
++            const delta = Number(log.metadata?.quantity) - Number(log.metadata?.previous_quantity)
++            return {date: log.timestamp.slice(0,10), reference: log.id || log.reference, sku: log.reference, product: inventory.find(item => item.sku === log.reference)?.product || log.reference, type: log.action, in: Math.max(0,delta), out: Math.max(0,-delta), location: String(log.metadata?.location || '-'), staff: log.user, remarks: log.details}
++        })
++        const rows = [...purchaseRows, ...saleRows, ...actionRows].filter((row) => matches([row.reference, row.sku, row.product, row.type, row.location, row.staff, row.remarks])).sort((a, b) => b.date.localeCompare(a.date))
+         return <SheetFrame title="Stock Movement" count={rows.length} sheet={sheet} onSheetChange={onSheetChange} headers={inventorySheetHeaders['stock-movement']}>
+             {rows.map((row, index) => <tr key={`${row.reference}-${index}`}><td>{displayValue(row.date)}</td><td>{row.reference}</td><td>{row.sku}</td><td>{row.product}</td><td><Status value={row.type} /></td><td>{row.in}</td><td>{row.out}</td><td>{row.location}</td><td>{row.staff}</td><td>{row.remarks || '-'}</td></tr>)}
+         </SheetFrame>
+     }
+ 
+     if (sheet === 'stock-count') {
+-        const rows = products.filter((item) => matches([item.rowId, item.product, item.dept])).map((item) => ({ ...item, date: new Date().toISOString().slice(0, 10), physical: item.closing, variance: 0, reason: 'Pending physical count', verifiedBy: auditLogs.find((log) => log.type === 'INVENTORY')?.user || '-' }))
++        const rows = products.filter((item) => matches([item.rowId, item.product, item.dept])).map((item) => ({ ...item, date: item.lastCountAt?.slice(0, 10) || '-', physical: item.lastCountQty ?? '-', variance: item.lastCountVariance ?? 0, reason: item.lastCountReason || 'Not yet counted', verifiedBy: '-'  }))
+         return <SheetFrame title="Stock Count" count={rows.length} sheet={sheet} onSheetChange={onSheetChange} headers={inventorySheetHeaders['stock-count']}>
+-            {rows.map((row) => <tr key={row.rowId}><td>{row.date}</td><td>{row.rowId}</td><td>{row.product}</td><td>{row.closing}</td><td>{row.physical}</td><td>{row.variance}</td><td>{formatCurrency(row.unitCost)}</td><td>{formatCurrency(row.variance * row.unitCost)}</td><td>{row.reason}</td><td>{row.verifiedBy}</td></tr>)}
++            {rows.map((row) => <tr key={row.rowId}><td>{row.date}</td><td>{row.rowId}</td><td>{row.product}</td><td>{row.lastCountQty == null ? row.closing : Number(row.lastCountQty) - Number(row.lastCountVariance || 0)}</td><td>{row.physical}</td><td>{row.variance}</td><td>{formatCurrency(row.unitCost)}</td><td>{formatCurrency(row.variance * row.unitCost)}</td><td>{row.reason}</td><td>{row.verifiedBy}</td></tr>)}
+         </SheetFrame>
+     }
+ 
+@@ -93,7 +97,7 @@
+     const outOfStock = products.filter((item) => item.closing <= 0).length
+     const damaged = products.reduce((sum, item) => sum + (item.damagedExpired || 0), 0)
+     const dashboardRows = [
+-        ['Total SKUs', formatNumber(products.length)], ['Total Stock Value', formatCurrency(totalStockValue)], ['Low Stock Items', formatNumber(lowStock)], ['Out-of-Stock Items', formatNumber(outOfStock)], ['Overstock Items', '0'], ['Damaged/Expired Stock', formatNumber(damaged)], ['Stock Variance', formatCurrency(0)], ['Fast-Moving Products', formatNumber(products.filter((item) => item.sold > 0).length)], ['Slow-Moving Products', formatNumber(products.filter((item) => item.sold > 0 && item.sold <= 5).length)], ['Dead Stock', formatNumber(products.filter((item) => item.closing > 0 && item.sold === 0).length)],
++        ['Total SKUs', formatNumber(products.length)], ['Total Stock Value', formatCurrency(totalStockValue)], ['Low Stock Items', formatNumber(lowStock)], ['Out-of-Stock Items', formatNumber(outOfStock)], ['Overstock Items', formatNumber(products.filter(item => Boolean(item.maximumStockLevel) && item.closing > Number(item.maximumStockLevel)).length)], ['Damaged/Expired Stock', formatNumber(damaged)], ['Last Count Variance', formatCurrency(products.reduce((sum,item) => sum + Number(item.lastCountVariance || 0) * item.unitCost, 0))], ['Fast-Moving Products', formatNumber(products.filter((item) => item.sold > 0).length)], ['Slow-Moving Products', formatNumber(products.filter((item) => item.sold > 0 && item.sold <= 5).length)], ['Dead Stock', formatNumber(products.filter((item) => item.closing > 0 && item.sold === 0).length)],
+     ]
+     return <SheetFrame title="Inventory Dashboard" count={dashboardRows.length} sheet={sheet} onSheetChange={onSheetChange} headers={inventorySheetHeaders['inventory-dashboard']}>
+         {dashboardRows.filter((row) => matches(row)).map(([label, value]) => <tr key={label}><td>{label}</td><td><strong>{value}</strong></td></tr>)}
+--- a/lib/accounting/chart-of-accounts.js
++++ b/lib/accounting/chart-of-accounts.js
+@@ -34,7 +34,7 @@
+     { id: 'acct-retained-earnings', code: '3100', name: 'Retained Earnings', accountType: 'EQUITY', accountSubType: 'OWNER_EQUITY', normalBalance: 'CREDIT', isControlAccount: false, isActive: true, currency: 'NGN' },
+     { id: 'acct-drawings', code: '3200', name: 'Drawings', accountType: 'EQUITY', accountSubType: 'OWNER_EQUITY', normalBalance: 'DEBIT', isControlAccount: false, isActive: true, currency: 'NGN' },
+     { id: 'acct-loan', code: '2100', name: 'Loan', accountType: 'LIABILITY', accountSubType: 'NON_CURRENT_LIABILITY', normalBalance: 'CREDIT', isControlAccount: false, isActive: true, currency: 'NGN' },
+-    { id: 'acct-payables-balance', code: '2000', name: 'Payables', accountType: 'LIABILITY', accountSubType: 'CURRENT_LIABILITY', normalBalance: 'CREDIT', isControlAccount: true, isActive: true, currency: 'NGN' },
++    { id: 'acct-payables-balance', code: '2005', name: 'Payables', accountType: 'LIABILITY', accountSubType: 'CURRENT_LIABILITY', normalBalance: 'CREDIT', isControlAccount: true, isActive: true, currency: 'NGN' },
+     { id: 'acct-accruals', code: '2200', name: 'Accruals', accountType: 'LIABILITY', accountSubType: 'CURRENT_LIABILITY', normalBalance: 'CREDIT', isControlAccount: false, isActive: true, currency: 'NGN' },
+ ]
+ 
+--- /dev/null
++++ b/lib/bank-settings.ts
+@@ -0,0 +1,13 @@
++export async function saveBankSettings(client: any, companyId: string, account: any) {
++    if (!client || !companyId) throw new Error('Sign in to a connected company before saving.')
++    for (const key of ['openingBalance','balance']) {
++        if (!Number.isFinite(account[key]) || account[key] < 0) throw new Error('Bank balances must be non-negative numbers.')
++    }
++    const {error} = await client.from('bank_accounts').upsert({
++        id: account.id, company_id: companyId, name: account.name, institution: account.institution,
++        account_number: account.accountNumber || null, account_type: account.accountType,
++        currency: account.currency, branch: account.branch || null, opening_balance: account.openingBalance,
++        opening_balance_date: account.openingBalanceDate || null, balance: account.balance, status: account.status.toLowerCase(),
++    }, {onConflict: 'id'})
++    if (error) throw new Error(error.message)
++}
+--- a/lib/context.tsx
++++ b/lib/context.tsx
+@@ -1,4 +1,6 @@
+ 'use client'
++
++import {loadAllInventory, inventoryToRow} from '@/lib/inventory-workflows'
+ 
+ import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
+ import { supabase } from './supabase.browser'
+@@ -222,6 +224,10 @@
+   packSize?: string
+   baseUnit?: string
+   conversionFactor?: number
++  lastCountQty?: number
++  lastCountVariance?: number
++  lastCountAt?: string
++  lastCountReason?: string
+   openQty: number
+   purchased: number
+   sold: number
+@@ -641,9 +647,10 @@
+     packSize: item.pack_size || '',
+     baseUnit: item.base_unit || '',
+     conversionFactor: Number(item.conversion_factor || 1),
+-    openQty: Number(item.stock_qty || 0),
+-    purchased: 0,
+-    sold: 0,
++    openQty: Number(item.opening_qty ?? item.stock_qty ?? 0),
++    purchased: Number(item.purchased_qty || 0),
++    sold: Number(item.sold_qty || 0),
++    lastCountQty: item.last_count_qty, lastCountVariance: item.last_count_variance, lastCountAt: item.last_count_at, lastCountReason: item.last_count_reason,
+     reserved: Number(item.reserved_qty || 0),
+     unitCost: Number(item.unit_cost || 0),
+     averageCost: Number(item.average_cost || item.unit_cost || 0),
+@@ -814,7 +821,7 @@
+           supabase.from('purchases').select('*, contacts(name), purchase_items(*)').eq('company_id', companyId).order('purchase_date', { ascending: false }).limit(200),
+           supabase.from('expenses').select('*, bank_accounts(name)').eq('company_id', companyId).order('expense_date', { ascending: false }).limit(200),
+           supabase.from('expense_categories').select('name').eq('company_id', companyId).order('name'),
+-          supabase.from('products').select('*').eq('company_id', companyId).is('deleted_at', null).order('updated_at', { ascending: false }).limit(200),
++          loadAllInventory(supabase, companyId),
+           supabase.from('prepayments').select('*, prepayment_schedules(*)').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
+           supabase.from('contacts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
+           supabase.from('bank_accounts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(100),
+@@ -899,7 +906,7 @@
+           purchases: mergeRemoteRecords(remotePurchases, prev.purchases, Boolean(purchasesErr)),
+           expenses: mergeRemoteRecords(remoteExpenses, prev.expenses, Boolean(expensesErr)),
+           expenseCategories: categoriesErr ? prev.expenseCategories : remoteExpenseCategories,
+-          inventory: mergeRemoteRecords(remoteInventory, prev.inventory, Boolean(inventoryErr), 'local', (item) => item.sku || item.product),
++          inventory: inventoryErr ? prev.inventory : remoteInventory,
+           prepayments: prepaymentsErr && prepaymentsErr.code !== 'PGRST205' ? prev.prepayments : mergeRemoteRecords(remotePrepayments, prev.prepayments, false),
+           supplierList: contactsErr ? prev.supplierList : supplierList,
+           customerList: contactsErr ? prev.customerList : customerList,
+@@ -1296,28 +1303,8 @@
+           }
+ 
+           if (normalizedUpdates.inventory) {
+-            const inventoryRows = (normalizedUpdates.inventory as InventoryItem[]).map((item) => ({
+-              company_id: companyId,
+-              sku: item.sku,
+-              name: item.product,
+-              description: item.description || null,
+-              category: item.dept || 'General',
+-              unit_cost: item.unitCost || 0,
+-              average_cost: item.averageCost ?? item.unitCost ?? 0,
+-              unit_price: item.sellingPrice ?? item.unitCost ?? 0,
+-              stock_qty: item.closing || 0,
+-              reserved_qty: item.reserved || 0,
+-              expiry_date: item.expiryDate || null,
+-              damaged_expired: item.damagedExpired || 0,
+-              reorder_level: item.reorderLevel || 0,
+-              reorder_quantity: item.reorderQuantity || 0,
+-              maximum_stock_level: item.maximumStockLevel || 0,
+-              branch: item.branch || null,
+-              deleted_at: (item as any).deletedAt || null,
+-              purge_after: (item as any).purgeAfter || null,
+-              updated_at: new Date().toISOString(),
+-            }))
+-            const { error: inventoryPersistErr } = await supabase.from('products').upsert(inventoryRows, { onConflict: 'sku' })
++            const inventoryRows = (normalizedUpdates.inventory as InventoryItem[]).map(item => inventoryToRow(item, companyId))
++            const { error: inventoryPersistErr } = await supabase.from('products').upsert(inventoryRows, { onConflict: 'company_id,sku' })
+             if (inventoryPersistErr) throw inventoryPersistErr
+           }
+ 
+@@ -1614,6 +1601,7 @@
+     if (uniqueSkus.length === 0) return
+ 
+     const purgeAfter = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
++    if (!supabase || !user?.companyId) throw new Error('Sign in to a connected company before deleting inventory.')
+     if (supabase && user?.companyId) {
+       const { error } = await supabase
+         .from('products')
+@@ -1624,7 +1612,7 @@
+     }
+ 
+     const deleted = new Set(uniqueSkus)
+-    updateState({ inventory: state.inventory.filter((item) => !deleted.has(item.sku || '')) })
++    updateState({ inventory: state.inventory.filter((item) => !deleted.has(item.sku || '')) }, {persist: false})
+   }
+ 
+   const login = (userData: User, remember: boolean) => {
+--- a/lib/import-utils.ts
++++ b/lib/import-utils.ts
+@@ -484,7 +484,7 @@
+ 
+     if (extension === 'csv') {
+         const text = await file.text()
+-        workbook = XLSX.read(text, { type: 'string' })
++        workbook = XLSX.read(text, { type: 'string', raw: true })
+     } else {
+         const buffer = await file.arrayBuffer()
+         workbook = XLSX.read(buffer, { type: 'array' })
+@@ -498,8 +498,15 @@
+         const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
+         if (sheetRows.length > 0) {
+             const normalizedSheetName = sheetName.trim()
+-            const rowsWithCategory = sheetRows.map((row) => ({
+-                ...normalizeRowKeys(row),
++            const rowsWithCategory = sheetRows.map((row, index) => ({
++                __sheet: sheetName, __row: (row as any).__rowNum__ !== undefined ? Number((row as any).__rowNum__) + 1 : index + 2,
++                ...Object.fromEntries(Object.entries(normalizeRowKeys(row)).map(([key, value]) => {
++                    if (['expiry date', 'expiry', 'manufacturing date'].includes(key) && typeof value === 'number') {
++                        const date = XLSX.SSF.parse_date_code(value)
++                        if (date) return [key, `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`]
++                    }
++                    return [key, value]
++                })),
+                 sheetCategory: normalizedSheetName,
+                 category: (() => {
+                     const normalizedRow = normalizeRowKeys(row)
+--- /dev/null
++++ b/lib/inventory-workflows.ts
+@@ -0,0 +1,98 @@
++export function inventoryNumber(value: unknown, label: string, fallback = 0): number {
++    if (value === '' || value === null || value === undefined) return fallback
++    const text = String(value).trim().replace(/^(?:NGN|₦|\$)\s*/i, '')
++    if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$|^\.\d+$/.test(text)) throw new Error(`${label}: enter a non-negative number, for example 12.5 or 1,250.75.`)
++    const number = Number(text.replaceAll(',', ''))
++    if (!Number.isFinite(number) || number < 0) throw new Error(`${label}: invalid number.`)
++    return number
++}
++
++export function prepareInventoryRows(rows: Record<string, unknown>[], existing: any[] = []): any[] {
++    const used = new Set(existing.map(item => String(item.sku || '').toUpperCase()))
++    const seen = new Set<string>()
++    return rows.map((original, index) => {
++        const row = Object.fromEntries(Object.entries(original).map(([key, value]) => [key.trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(), value]))
++        const at = `${original.__sheet || 'File'} row ${original.__row || index + 2}`
++        const get = (...keys: string[]) => keys.map(key => row[key]).find(value => value !== undefined && value !== null && String(value).trim() !== '')
++        const name = String(get('product name', 'product', 'item name', 'item', 'name', 'description') || '').trim()
++        if (!name) throw new Error(`${at}: Product Name is required. No rows have been saved.`)
++        let sku = String(get('sku', 'product code', 'item code') || '').trim()
++        const matches = existing.filter(item => item.product.trim().toLowerCase() === name.toLowerCase())
++        if (!sku && matches.length > 1) throw new Error(`${at}: multiple products named ${name}; supply a SKU.`)
++        if (!sku && matches.length === 1) sku = matches[0].sku || ''
++        if (!sku) {
++            const prefix = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'ITEM'
++            let n = 1
++            while (used.has(`${prefix}-${String(n).padStart(3, '0')}`)) n++
++            sku = `${prefix}-${String(n).padStart(3, '0')}`
++        }
++        const key = sku.toUpperCase()
++        if (seen.has(key)) throw new Error(`${at}: duplicate SKU ${sku}. Give each product a unique SKU; no rows have been saved.`)
++        seen.add(key); used.add(key)
++        const previous = existing.find(item => String(item.sku || '').toUpperCase() === key)
++        const num = (keys: string[], fallback = 0) => inventoryNumber(get(...keys), `${at} ${keys[0]}`, fallback)
++        const openingInput = get('opening stock qty', 'opening stock', 'opening qty', 'opening quantity', 'openqty', 'open qty', 'opening balance', 'opening')
++        const closingInput = get('stock qty', 'stock quantity', 'items in stock', 'march stock count', 'stock balance', 'stock bal', 'closing', 'closing stock', 'quantity', 'qty', 'stock', 'available')
++        const purchased = num(['purchased', 'no purchased', 'purchase qty', 'purchased qty'], previous?.purchased || 0)
++        const sold = num(['sold', 'sold qty', 'qty sold'], previous?.sold || 0)
++        const opening = inventoryNumber(openingInput, `${at} opening stock`, previous?.openQty ?? (closingInput === undefined ? 0 : inventoryNumber(closingInput, `${at} stock`)))
++        const closing = inventoryNumber(closingInput, `${at} stock`, openingInput !== undefined ? opening + purchased - sold : previous?.closing ?? opening + purchased - sold)
++        if (closing < 0) throw new Error(`${at}: calculated stock cannot be negative.`)
++        const unitCost = num(['unit cost', 'unitcost', 'cost price', 'cost'], previous?.unitCost || 0)
++        const result: any = {
++            ...previous, product: name, sku: previous?.sku || sku,
++            dept: String(get('category', 'dept', 'department', 'sheetcategory') || previous?.dept || 'General'),
++            openQty: opening, purchased, sold, closing, unitCost,
++            sellingPrice: num(['selling price', 'unit selling price', 'sellingprice', 'unit price', 'price'], previous?.sellingPrice ?? unitCost),
++            reorderLevel: num(['reorder level', 'reorder'], Number(previous?.reorderLevel || 0)),
++            reorderQuantity: num(['reorder quantity'], Number(previous?.reorderQuantity || 0)),
++            damagedExpired: num(['damaged expired', 'damagedexpired'], Number(previous?.damagedExpired || 0)),
++        }
++        for (const [field, aliases] of Object.entries({brand: ['brand'], packSize: ['pack size'], branch: ['branch', 'location', 'warehouse'], description: ['description', 'product description'], supplier: ['supplier']})) {
++            const value = get(...aliases)
++            if (value !== undefined) result[field] = String(value).trim()
++        }
++        const expiry = get('expiry date', 'expirydate', 'expiry')
++        if (expiry !== undefined) {
++            const date = String(expiry).trim()
++            if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error(`${at}: use YYYY-MM-DD for expiry date.`)
++            result.expiryDate = date
++        }
++        return result
++    })
++}
++
++export function inventoryToRow(item: any, companyId: string) {
++    if (!companyId || !item.sku || !item.product?.trim()) throw new Error('Company, SKU and product name are required.')
++    return {
++        company_id: companyId, sku: item.sku, name: item.product.trim(), category: item.dept || 'General',
++        description: item.description || null, branch: item.branch || null, brand: item.brand || null,
++        pack_size: item.packSize || null, supplier: item.supplier || null,
++        unit_cost: inventoryNumber(item.unitCost, 'Unit cost'), unit_price: inventoryNumber(item.sellingPrice ?? item.unitCost, 'Selling price'),
++        stock_qty: inventoryNumber(item.closing, 'Stock'), opening_qty: inventoryNumber(item.openQty, 'Opening stock'),
++        purchased_qty: inventoryNumber(item.purchased, 'Purchased'), sold_qty: inventoryNumber(item.sold, 'Sold'),
++        damaged_expired: inventoryNumber(item.damagedExpired, 'Damaged stock'),
++        reorder_level: inventoryNumber(item.reorderLevel, 'Reorder level'), reorder_quantity: inventoryNumber(item.reorderQuantity, 'Reorder quantity'),
++        reserved_qty: inventoryNumber(item.reserved, 'Reserved stock'), maximum_stock_level: inventoryNumber(item.maximumStockLevel, 'Maximum stock'),
++        expiry_date: item.expiryDate || null, status: item.active === false ? 'inactive' : 'active',
++        updated_at: new Date().toISOString(),
++    }
++}
++
++export async function loadAllInventory(client: any, companyId: string) {
++    const rows: any[] = []
++    for (;;) {
++        const {data, error} = await client.from('products').select('*').eq('company_id', companyId).is('deleted_at', null).order('id').range(rows.length, rows.length + 499)
++        if (error) return {data: null, error}
++        if (!data?.length) return {data: rows, error: null}
++        rows.push(...data)
++    }
++}
++
++export async function saveInventoryRows(client: any, companyId: string, items: any[]) {
++    if (!client || !companyId) throw new Error('Sign in to a connected company before saving.')
++    if (!items.length) throw new Error('There are no inventory rows to save.')
++    const rows = items.map(item => inventoryToRow(item, companyId))
++    const {error} = await client.from('products').upsert(rows, {onConflict: 'company_id,sku'})
++    if (error) throw new Error(`Inventory was not confirmed saved: ${error.message}. Confirm migration 030 has been applied.`)
++}
+--- /dev/null
++++ b/lib/opening-balances.ts
+@@ -0,0 +1,31 @@
++const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
++export async function saveOpeningBalances(client: any, companyId: string, accounts: any[]) {
++    if (!client || !companyId) throw new Error('Sign in to a connected company before saving.')
++    const {data: existing, error: lookupError} = await client.from('chart_of_accounts').select('id,name,code').eq('company_id', companyId)
++    if (lookupError) throw new Error(lookupError.message)
++    const ids: Record<string, string> = {}
++    const codes = new Set<string>()
++    const saved = accounts.map(account => {
++        const sameName = (existing || []).filter((row: any) => row.name.trim().toLowerCase() === account.name.trim().toLowerCase())
++        if (sameName.length > 1) throw new Error(`Duplicate account ${account.name}; reconcile it before saving.`)
++        const id = uuid.test(account.id) ? account.id : sameName[0]?.id || crypto.randomUUID()
++        ids[account.id] = id
++        const code = sameName[0]?.code || (account.name === 'Payables' && account.code === '2000' ? '2005' : account.code)
++        if (codes.has(code)) throw new Error(`Duplicate account code ${code}; no balances have been saved.`)
++        codes.add(code)
++        const balance = Number(account.openingBalance ?? 0)
++        if (!Number.isFinite(balance) || balance < 0) throw new Error(`Invalid opening balance for ${account.name}.`)
++        const date = account.openingBalanceDate || null
++        if (date && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0,10) !== date)) throw new Error(`Invalid opening date for ${account.name}.`)
++        return {...account, id, code, openingBalance: balance, openingBalanceDate: date}
++    })
++    const {error} = await client.from('chart_of_accounts').upsert(saved.map(account => ({
++        id: account.id, company_id: companyId, code: account.code, name: account.name,
++        account_type: account.accountType, account_subtype: account.accountSubType || null,
++        normal_balance: account.normalBalance, is_control_account: account.isControlAccount || false,
++        is_active: account.isActive !== false, currency: account.currency || 'NGN',
++        opening_balance: account.openingBalance, opening_balance_date: account.openingBalanceDate,
++    })), {onConflict: 'id'})
++    if (error) throw new Error(`Opening balances were not confirmed saved: ${error.message}. Confirm migration 030 has been applied.`)
++    return {accounts: saved, ids}
++}
+--- a/lib/utils.ts
++++ b/lib/utils.ts
+@@ -8,7 +8,7 @@
+ export function formatCurrency(value: number): string {
+   return `₦${value.toLocaleString('en-NG', {
+     minimumFractionDigits: 0,
+-    maximumFractionDigits: 0,
++    maximumFractionDigits: 2,
+   })}`
+ }
+ 
+@@ -20,7 +20,7 @@
+ export function formatNumber(value: number): string {
+   return value.toLocaleString('en-NG', {
+     minimumFractionDigits: 0,
+-    maximumFractionDigits: 0,
++    maximumFractionDigits: 6,
+   })
+ }
+ 
+--- /dev/null
++++ b/migrations/030_inventory_onboarding_reliability.sql
+@@ -0,0 +1,59 @@
++-- Apply after 029. Back up the database first. All schema changes are atomic.
++BEGIN;
++ALTER TABLE products ALTER COLUMN stock_qty TYPE numeric(18,6) USING stock_qty::numeric;
++ALTER TABLE products ALTER COLUMN damaged_expired TYPE numeric(18,6) USING damaged_expired::numeric;
++ALTER TABLE products ALTER COLUMN reorder_level TYPE numeric(18,6) USING reorder_level::numeric;
++ALTER TABLE products ALTER COLUMN reorder_quantity TYPE numeric(18,6) USING reorder_quantity::numeric;
++ALTER TABLE products ALTER COLUMN reserved_qty TYPE numeric(18,6) USING reserved_qty::numeric;
++ALTER TABLE products ALTER COLUMN maximum_stock_level TYPE numeric(18,6) USING maximum_stock_level::numeric;
++ALTER TABLE products ADD COLUMN IF NOT EXISTS opening_qty numeric(18,6);
++ALTER TABLE products ADD COLUMN IF NOT EXISTS purchased_qty numeric(18,6) NOT NULL DEFAULT 0;
++ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_qty numeric(18,6) NOT NULL DEFAULT 0;
++UPDATE products SET opening_qty = stock_qty WHERE opening_qty IS NULL;
++ALTER TABLE products ALTER COLUMN opening_qty SET DEFAULT 0;
++ALTER TABLE products ALTER COLUMN opening_qty SET NOT NULL;
++ALTER TABLE products ADD COLUMN IF NOT EXISTS last_count_qty numeric(18,6);
++ALTER TABLE products ADD COLUMN IF NOT EXISTS last_count_variance numeric(18,6);
++ALTER TABLE products ADD COLUMN IF NOT EXISTS last_count_at timestamptz;
++ALTER TABLE products ADD COLUMN IF NOT EXISTS last_count_reason text;
++ALTER TABLE products DROP CONSTRAINT IF EXISTS products_sku_key;
++CREATE UNIQUE INDEX IF NOT EXISTS products_company_sku_key ON products(company_id, sku);
++ALTER TABLE chart_of_accounts DROP CONSTRAINT IF EXISTS chart_of_accounts_code_key;
++CREATE UNIQUE INDEX IF NOT EXISTS accounts_company_code_key ON chart_of_accounts(company_id, code);
++ALTER TABLE chart_of_accounts ADD COLUMN IF NOT EXISTS opening_balance numeric(18,2) NOT NULL DEFAULT 0;
++ALTER TABLE chart_of_accounts ADD COLUMN IF NOT EXISTS opening_balance_date date;
++
++-- Uses the caller's existing database permissions; does not bypass RLS.
++-- Location changes move the WHOLE product balance, not partial stock between warehouses.
++CREATE OR REPLACE FUNCTION apply_inventory_action(
++  p_company_id uuid, p_sku text, p_action text, p_quantity numeric,
++  p_reason text, p_location text DEFAULT NULL
++) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
++DECLARE item products%ROWTYPE; previous_quantity numeric; event_id uuid;
++BEGIN
++  IF NULLIF(trim(p_reason), '') IS NULL THEN RAISE EXCEPTION 'A reason is required'; END IF;
++  SELECT * INTO item FROM products WHERE company_id = p_company_id AND sku = p_sku AND deleted_at IS NULL FOR UPDATE;
++  IF NOT FOUND THEN RAISE EXCEPTION 'Product not found in this company'; END IF;
++  previous_quantity := item.stock_qty;
++  IF p_action = 'relocate' THEN
++    IF NULLIF(trim(p_location), '') IS NULL THEN RAISE EXCEPTION 'A destination is required'; END IF;
++    UPDATE products SET branch = trim(p_location) WHERE id = item.id RETURNING * INTO item;
++  ELSIF p_action IN ('receive', 'increase', 'decrease', 'count') THEN
++    IF p_quantity IS NULL OR p_quantity::text IN ('NaN','Infinity','-Infinity') OR p_quantity < 0 OR (p_quantity = 0 AND p_action <> 'count') THEN RAISE EXCEPTION 'Enter a valid quantity'; END IF;
++    IF p_action = 'decrease' AND p_quantity > item.stock_qty THEN RAISE EXCEPTION 'Quantity exceeds available stock'; END IF;
++    UPDATE products SET
++      stock_qty = CASE WHEN p_action = 'count' THEN p_quantity WHEN p_action = 'decrease' THEN stock_qty - p_quantity ELSE stock_qty + p_quantity END,
++      purchased_qty = purchased_qty + CASE WHEN p_action = 'receive' THEN p_quantity ELSE 0 END,
++      last_count_qty = CASE WHEN p_action = 'count' THEN p_quantity ELSE last_count_qty END,
++      last_count_variance = CASE WHEN p_action = 'count' THEN p_quantity - previous_quantity ELSE last_count_variance END,
++      last_count_at = CASE WHEN p_action = 'count' THEN NOW() ELSE last_count_at END,
++      last_count_reason = CASE WHEN p_action = 'count' THEN trim(p_reason) ELSE last_count_reason END
++    WHERE id = item.id RETURNING * INTO item;
++  ELSE RAISE EXCEPTION 'Unknown inventory action'; END IF;
++  INSERT INTO audit_logs(company_id, action, entity, reference, details, metadata)
++    VALUES(p_company_id, upper(p_action), 'INVENTORY', p_sku, trim(p_reason),
++      jsonb_build_object('previous_quantity',previous_quantity,'quantity',item.stock_qty,'location',item.branch)) RETURNING id INTO event_id;
++  RETURN to_jsonb(item) || jsonb_build_object('audit_id', event_id, 'previous_quantity', previous_quantity);
++END;
++$$;
++COMMIT;
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -28,6 +28,7 @@
+         "xlsx": "^0.18.5"
+       },
+       "devDependencies": {
++        "@electric-sql/pglite": "^0.5.8",
+         "@types/node": "^24",
+         "@types/react": "^19",
+         "@types/react-dom": "^19",
+@@ -701,6 +702,13 @@
+       "integrity": "sha512-VYJy0uhFm9zTJ1TxBaW/pA8bjbOM/OttaNMwZ1RHG4JKyRG7DhSdiqD1ipQoAyoD22olUtxbP78W9xY3Wd11bg==",
+       "license": "BSD-3-Clause"
+     },
++    "node_modules/@electric-sql/pglite": {
++      "version": "0.5.8",
++      "resolved": "https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz",
++      "integrity": "sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q==",
++      "dev": true,
++      "license": "Apache-2.0"
++    },
+     "node_modules/@emnapi/runtime": {
+       "version": "1.11.3",
+       "resolved": "https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz",
+@@ -854,9 +862,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -873,9 +878,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -892,9 +894,6 @@
+       "cpu": [
+         "ppc64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -911,9 +910,6 @@
+       "cpu": [
+         "riscv64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -930,9 +926,6 @@
+       "cpu": [
+         "s390x"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -949,9 +942,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -968,9 +958,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -987,9 +974,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "LGPL-3.0-or-later",
+       "optional": true,
+       "os": [
+@@ -1006,9 +990,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+@@ -1031,9 +1012,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+@@ -1056,9 +1034,6 @@
+       "cpu": [
+         "ppc64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+@@ -1081,9 +1056,6 @@
+       "cpu": [
+         "riscv64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+@@ -1106,9 +1078,6 @@
+       "cpu": [
+         "s390x"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+@@ -1131,9 +1100,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+@@ -1156,9 +1122,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+@@ -1180,9 +1143,6 @@
+       "integrity": "sha512-Jg8wNT1MUzIvhBFxViqrEhWDGzqymo3sV7z7ZsaWbZNDLXRJZoRGrjulp60YYtV4wfY8VIKcWidjojlLcWrd8Q==",
+       "cpu": [
+         "x64"
+-      ],
+-      "libc": [
+-        "musl"
+       ],
+       "license": "Apache-2.0",
+       "optional": true,
+@@ -1405,9 +1365,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1424,9 +1381,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1443,9 +1397,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1461,9 +1412,6 @@
+       "integrity": "sha512-HKQ5SP/V/ub73UvF7n/zeJlxk2kLmtL7Wzrg4WfmkjmNos5onJ2tKu7yZOPdL18A6Svfn3max29ym+ry7NkK4g==",
+       "cpu": [
+         "x64"
+-      ],
+-      "libc": [
+-        "musl"
+       ],
+       "license": "MIT",
+       "optional": true,
+@@ -1777,9 +1725,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1796,9 +1741,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1815,9 +1757,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1833,9 +1772,6 @@
+       "integrity": "sha512-SJxX60smvHgasZoBy11dX6YRjXJFovwWBoedhbQPOBzgFWBHGB+TVPWB9BxzR7TTxU8FQZAI2AyiNCMzFm8Img==",
+       "cpu": [
+         "x64"
+-      ],
+-      "libc": [
+-        "musl"
+       ],
+       "license": "MIT",
+       "optional": true,
+@@ -4177,9 +4113,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -4200,9 +4133,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -4223,9 +4153,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -4245,9 +4172,6 @@
+       "integrity": "sha512-bYcLp+Vb0awsiXg/80uCRezCYHNg1/l3mt0gzHnWV9XP1W5sKa5/TCdGWaR/zBM2PeF/HbsQv/j2URNOiVuxWg==",
+       "cpu": [
+         "x64"
+-      ],
+-      "libc": [
+-        "musl"
+       ],
+       "license": "MPL-2.0",
+       "optional": true,
+--- a/package.json
++++ b/package.json
+@@ -7,11 +7,14 @@
+     "build": "next build --webpack",
+     "postbuild": "node scripts/copy-standalone-assets.mjs",
+     "start": "node server.js",
+-    "lint": "eslint ."
++    "lint": "eslint .",
++    "test:inventory": "node --test tests/inventory-onboarding.test.mjs tests/spreadsheet-import.test.mjs",
++    "test:inventory-db": "node scripts/verify-inventory-db.mjs"
+   },
+   "dependencies": {
+     "@base-ui/react": "^1.5.0",
+     "@supabase/supabase-js": "^2.111.0",
++    "@tailwindcss/postcss": "^4.3.3",
+     "@vercel/analytics": "1.6.1",
+     "class-variance-authority": "^0.7.1",
+     "clsx": "^2.1.1",
+@@ -19,7 +22,6 @@
+     "lucide-react": "^1.16.0",
+     "mammoth": "^1.12.1",
+     "next": "16.2.6",
+-    "@tailwindcss/postcss": "^4.3.3",
+     "postcss": "^8.5",
+     "react": "^19",
+     "react-dom": "^19",
+@@ -30,6 +32,7 @@
+     "xlsx": "^0.18.5"
+   },
+   "devDependencies": {
++    "@electric-sql/pglite": "^0.5.8",
+     "@types/node": "^24",
+     "@types/react": "^19",
+     "@types/react-dom": "^19",
+--- /dev/null
++++ b/scripts/verify-inventory-db.mjs
+@@ -0,0 +1,28 @@
++import {PGlite} from '@electric-sql/pglite'
++import fs from 'node:fs'
++import path from 'node:path'
++import assert from 'node:assert/strict'
++import {fileURLToPath} from 'node:url'
++const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
++const db=new PGlite()
++const dir=path.join(root,'migrations')
++const files=['initial_schema.sql',...fs.readdirSync(dir).filter(f=>/^\d.*\.sql$/.test(f)).sort()]
++for(const file of files){try{await db.exec(fs.readFileSync(path.join(dir,file),'utf8'));console.log('Applied',file)}catch(e){console.error('FAILED',file,e.message);process.exit(1)}}
++const companyA='11111111-1111-4111-8111-111111111111',companyB='22222222-2222-4222-8222-222222222222'
++await db.query('INSERT INTO companies(id,name) VALUES($1,\'A\'),($2,\'B\')',[companyA,companyB])
++await db.query("INSERT INTO products(company_id,sku,name,stock_qty,opening_qty,unit_cost) VALUES($1,'RICE','Rice',10.75,10.75,123.45),($2,'RICE','Rice',7.25,7.25,123.45)",[companyA,companyB])
++const action=async(type,qty,reason='Test',location=null)=> (await db.query('SELECT apply_inventory_action($1,$2,$3,$4,$5,$6) AS item',[companyA,'RICE',type,qty,reason,location])).rows[0].item
++assert.equal(Number((await action('receive',1.25)).stock_qty),12)
++assert.equal(Number((await action('decrease',0.5)).stock_qty),11.5)
++await assert.rejects(action('decrease',100),/exceeds/)
++assert.equal(Number((await action('count',0)).stock_qty),0)
++const counted=await action('count',4.75);assert.equal(Number(counted.last_count_variance),4.75)
++const relocated=await action('relocate',0,'Move','Store Front');assert.equal(Number(relocated.stock_qty),4.75);assert.equal(relocated.branch,'Store Front')
++assert.equal(Number((await db.query("SELECT stock_qty FROM products WHERE company_id=$1",[companyB])).rows[0].stock_qty),7.25)
++await assert.rejects(action('increase',1,''),/reason/)
++await db.query("INSERT INTO chart_of_accounts(company_id,code,name,account_type,normal_balance,opening_balance) VALUES($1,'1000','Cash','ASSET','DEBIT',1234.56),($2,'1000','Cash','ASSET','DEBIT',0)",[companyA,companyB])
++assert.equal(Number((await db.query('SELECT opening_balance FROM chart_of_accounts WHERE company_id=$1',[companyA])).rows[0].opening_balance),1234.56)
++await db.exec(fs.readFileSync(path.join(dir,'030_inventory_onboarding_reliability.sql'),'utf8'))
++assert.equal(Number((await db.query("SELECT opening_qty FROM products WHERE company_id=$1",[companyA])).rows[0].opening_qty),10.75)
++console.log('PASS: decimal stock, company-scoped SKUs/codes, receive/decrease/count/relocate, invalid-action rollback, opening balances and migration re-run.')
++await db.close()
+--- /dev/null
++++ b/tests/inventory-onboarding.test.mjs
+@@ -0,0 +1,63 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import {prepareInventoryRows, inventoryNumber, inventoryToRow, loadAllInventory, saveInventoryRows} from '../lib/inventory-workflows.ts'
++import {saveOpeningBalances} from '../lib/opening-balances.ts'
++import {saveBankSettings} from '../lib/bank-settings.ts'
++
++const existing = {product:'Rice', sku:'R-1', dept:'Food', openQty:10, purchased:2, sold:1, closing:11, unitCost:123.45, sellingPrice:150.75}
++test('inventory file preserves decimals, zero values and product name ahead of description', () => {
++ const [item] = prepareInventoryRows([{'Product Name':'Rice', Description:'Bag',SKU:'R-1','Opening Stock':0,'Stock Qty':0,'Unit Cost':'₦1,234.50','Selling Price':0,Purchased:0,Sold:0}], [existing])
++ assert.equal(item.product,'Rice'); assert.equal(item.closing,0);assert.equal(item.openQty,0);assert.equal(item.sellingPrice,0);assert.equal(item.unitCost,1234.5)
++ const [fraction] = prepareInventoryRows([{'Product Name':'Oil','Opening Stock':12.75,'Purchased':1.5,'Sold':0.25}])
++ assert.equal(fraction.closing,14);assert.equal(inventoryToRow(fraction,'company').opening_qty,12.75)
++})
++test('all 1201 input rows remain in the inventory import', () => {
++ const rows = Array.from({length:1201},(_,i)=>({'Product Name':`Item ${i}`,SKU:`S-${i}`,'Stock Qty':i+0.5}))
++ const result=prepareInventoryRows(rows);assert.equal(result.length,1201);assert.equal(result.at(-1).closing,1200.5)
++})
++test('distinct SKUs with the same product name remain distinct', () => {
++ assert.equal(prepareInventoryRows([{SKU:'A',Product:'Rice'},{SKU:'B',Product:'Rice'}]).length,2)
++ assert.throws(()=>prepareInventoryRows([{SKU:'A',Product:'Rice'},{SKU:'a',Product:'Oil'}]), /duplicate SKU/)
++})
++test('bad input is reported rather than dropped or converted to zero', () => {
++ assert.throws(()=>prepareInventoryRows([{SKU:'A','Unit Cost':2}]), /Product Name/)
++ for(const value of ['abc','12,5',-1,Infinity]) assert.throws(()=>inventoryNumber(value,'Quantity'))
++ assert.throws(()=>prepareInventoryRows([{Product:'Rice','Expiry Date':'2026-02-31'}]), /expiry/)
++})
++test('SKU allocation avoids existing products and repeat import updates the same SKU', () => {
++ const first=prepareInventoryRows([{Product:'Rice',Quantity:2.5}],[existing]);assert.equal(first[0].sku,'R-1')
++ const second=prepareInventoryRows([{Product:'Rice',Quantity:0}],first);assert.equal(second[0].sku,'R-1');assert.equal(second[0].closing,0)
++})
++test('paginated loading handles server caps smaller than requested pages', async () => {
++ const source=Array.from({length:1201},(_,id)=>({id}));const offsets=[]
++ const query={select(){return this},eq(){return this},is(){return this},order(){return this},async range(start){offsets.push(start);return {data:source.slice(start,start+200),error:null}}}
++ const result=await loadAllInventory({from:()=>query},'company')
++ assert.equal(result.data.length,1201);assert.deepEqual(offsets,[0,200,400,600,800,1000,1200,1201])
++})
++test('pagination failure does not return a partial inventory as success',async()=>{
++ let n=0;const query={select(){return this},eq(){return this},is(){return this},order(){return this},async range(){return ++n===1?{data:[{id:1}],error:null}:{data:null,error:{message:'offline'}}}}
++ const result=await loadAllInventory({from:()=>query},'company');assert.equal(result.data,null);assert.equal(result.error.message,'offline')
++})
++test('bulk save uses one statement and surfaces database rejection',async()=>{
++ let calls=0;const client={from:()=>({async upsert(rows,options){calls++;assert.equal(rows.length,2);assert.equal(options.onConflict,'company_id,sku');return {error:{message:'permission denied'}}}})}
++ await assert.rejects(saveInventoryRows(client,'company',[existing,{...existing,sku:'B'}]),/permission denied/);assert.equal(calls,1)
++})
++function accountsClient(error=null) {
++ const result={written:null};const query={select(){return this},async eq(){return {data:[],error:null}},async upsert(rows){result.written=rows;return {error}}}
++ return {...result,query,client:{from:()=>query},getWritten:()=>result.written}
++}
++const account={id:'acct-cash',code:'1000',name:'Cash',accountType:'ASSET',normalBalance:'DEBIT',openingBalance:1234.56,openingBalanceDate:'2026-10-03'}
++test('opening balances persist temporary accounts as UUIDs and preserve cents and zero',async()=>{
++ const mock=accountsClient();const result=await saveOpeningBalances(mock.client,'company',[account,{...account,id:'acct-other',code:'1005',name:'Other',openingBalance:0}])
++ assert.match(result.accounts[0].id,/^[0-9a-f-]{36}$/);assert.equal(result.ids['acct-cash'],result.accounts[0].id)
++ assert.equal(mock.getWritten()[0].opening_balance,1234.56);assert.equal(mock.getWritten()[1].opening_balance,0)
++})
++test('opening save failures are surfaced; duplicate account codes never write',async()=>{
++ const mock=accountsClient({message:'database unavailable'});await assert.rejects(saveOpeningBalances(mock.client,'company',[account]),/database unavailable/)
++ const clean=accountsClient();await assert.rejects(saveOpeningBalances(clean.client,'company',[account,{...account,id:'other',name:'Other'}]),/Duplicate account code/);assert.equal(clean.getWritten(),null)
++})
++test('bank opening balances preserve cents and report rejected writes',async()=>{
++ let row;const client={from:()=>({async upsert(value){row=value;return {error:{message:'write failed'}}}})}
++ await assert.rejects(saveBankSettings(client,'company',{id:'id',name:'Cash',openingBalance:125.75,balance:125.75,status:'active'}),/write failed/)
++ assert.equal(row.opening_balance,125.75)
++})
+--- /dev/null
++++ b/tests/spreadsheet-import.test.mjs
+@@ -0,0 +1,37 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import {createRequire} from 'node:module'
++import fs from 'node:fs'
++import {prepareInventoryRows} from '../lib/inventory-workflows.ts'
++const require = createRequire(import.meta.url)
++const ts = require('typescript')
++const previous = require.extensions['.ts']
++require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename,'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText, filename)
++const {parseSpreadsheetFile} = require('../lib/import-utils.ts')
++require.extensions['.ts'] = previous
++const XLSX = require('xlsx')
++test('real CSV retains quoted names and decimal quantities and prices',async()=>{
++ const file = new File(['SKU,Product Name,Stock Qty,Unit Cost\nA,"Rice, premium",12.75,"1,250.50"\nB,Oil,0,0\n'],'products.csv')
++ const rows=await parseSpreadsheetFile(file);const result=prepareInventoryRows(rows)
++ assert.equal(result.length,2);assert.equal(result[0].product,'Rice, premium');assert.equal(result[0].closing,12.75);assert.equal(result[0].unitCost,1250.5);assert.equal(result[1].closing,0)
++})
++test('real Excel workbook imports all sheets and over 1000 products',async()=>{
++ const workbook=XLSX.utils.book_new()
++ for(const sheet of ['Food','Drinks']) XLSX.utils.book_append_sheet(workbook,XLSX.utils.json_to_sheet(Array.from({length:601},(_,i)=>({'Product Name':`${sheet} ${i}`,SKU:`${sheet}-${i}`,'Stock Qty':i+0.125,'Unit Cost':99.75}))),sheet)
++ const file=new File([XLSX.write(workbook,{type:'buffer',bookType:'xlsx'})],'products.xlsx')
++ const result=prepareInventoryRows(await parseSpreadsheetFile(file))
++ assert.equal(result.length,1202);assert.equal(result.at(-1).closing,600.125);assert.equal(result[0].dept,'Food');assert.equal(result.at(-1).dept,'Drinks')
++})
++
++test('Excel date cells become ISO expiry dates',async()=>{
++ const workbook=XLSX.utils.book_new()
++ XLSX.utils.book_append_sheet(workbook,XLSX.utils.json_to_sheet([{'Product Name':'Rice',SKU:'R','Expiry Date':new Date(2027, 0, 31)}]),'Food')
++ const file=new File([XLSX.write(workbook,{type:'buffer',bookType:'xlsx'})],'dates.xlsx')
++ assert.equal(prepareInventoryRows(await parseSpreadsheetFile(file))[0].expiryDate,'2027-01-31')
++})
++
++test('CSV preserves leading-zero SKUs and literal dates',async()=>{
++ const file=new File(['SKU,Product Name,Expiry Date,Stock Qty\n001,Rice,2027-01-31,1.5\n'],'dates.csv')
++ const [item]=prepareInventoryRows(await parseSpreadsheetFile(file))
++ assert.equal(item.sku,'001');assert.equal(item.expiryDate,'2027-01-31');assert.equal(item.closing,1.5)
++})

@@ -8,7 +8,7 @@ export function cn(...inputs: ClassValue[]) {
 export function formatCurrency(value: number): string {
   return `₦${value.toLocaleString('en-NG', {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
+    maximumFractionDigits: 2,
   })}`
 }
 
@@ -20,7 +20,7 @@ export function formatCurrencyOrZero(value?: number | null): string {
 export function formatNumber(value: number): string {
   return value.toLocaleString('en-NG', {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
+    maximumFractionDigits: 6,
   })
 }
 

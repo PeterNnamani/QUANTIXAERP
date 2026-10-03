@@ -1,5 +1,7 @@
 'use client'
 
+import {loadAllInventory, inventoryToRow} from '@/lib/inventory-workflows'
+
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 import { supabase } from './supabase.browser'
 import WorkspaceLoader from '@/components/layout/workspace-loader'
@@ -222,6 +224,10 @@ export interface InventoryItem {
   packSize?: string
   baseUnit?: string
   conversionFactor?: number
+  lastCountQty?: number
+  lastCountVariance?: number
+  lastCountAt?: string
+  lastCountReason?: string
   openQty: number
   purchased: number
   sold: number
@@ -641,9 +647,10 @@ function normalizeRemoteInventory(data: any[]): AppState['inventory'] {
     packSize: item.pack_size || '',
     baseUnit: item.base_unit || '',
     conversionFactor: Number(item.conversion_factor || 1),
-    openQty: Number(item.stock_qty || 0),
-    purchased: 0,
-    sold: 0,
+    openQty: Number(item.opening_qty ?? item.stock_qty ?? 0),
+    purchased: Number(item.purchased_qty || 0),
+    sold: Number(item.sold_qty || 0),
+    lastCountQty: item.last_count_qty, lastCountVariance: item.last_count_variance, lastCountAt: item.last_count_at, lastCountReason: item.last_count_reason,
     reserved: Number(item.reserved_qty || 0),
     unitCost: Number(item.unit_cost || 0),
     averageCost: Number(item.average_cost || item.unit_cost || 0),
@@ -814,7 +821,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           supabase.from('purchases').select('*, contacts(name), purchase_items(*)').eq('company_id', companyId).order('purchase_date', { ascending: false }).limit(200),
           supabase.from('expenses').select('*, bank_accounts(name)').eq('company_id', companyId).order('expense_date', { ascending: false }).limit(200),
           supabase.from('expense_categories').select('name').eq('company_id', companyId).order('name'),
-          supabase.from('products').select('*').eq('company_id', companyId).is('deleted_at', null).order('updated_at', { ascending: false }).limit(200),
+          loadAllInventory(supabase, companyId),
           supabase.from('prepayments').select('*, prepayment_schedules(*)').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('contacts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(200),
           supabase.from('bank_accounts').select('*').eq('company_id', companyId).order('created_at', { ascending: false }).limit(100),
@@ -899,7 +906,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           purchases: mergeRemoteRecords(remotePurchases, prev.purchases, Boolean(purchasesErr)),
           expenses: mergeRemoteRecords(remoteExpenses, prev.expenses, Boolean(expensesErr)),
           expenseCategories: categoriesErr ? prev.expenseCategories : remoteExpenseCategories,
-          inventory: mergeRemoteRecords(remoteInventory, prev.inventory, Boolean(inventoryErr), 'local', (item) => item.sku || item.product),
+          inventory: inventoryErr ? prev.inventory : remoteInventory,
           prepayments: prepaymentsErr && prepaymentsErr.code !== 'PGRST205' ? prev.prepayments : mergeRemoteRecords(remotePrepayments, prev.prepayments, false),
           supplierList: contactsErr ? prev.supplierList : supplierList,
           customerList: contactsErr ? prev.customerList : customerList,
@@ -1296,28 +1303,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.inventory) {
-            const inventoryRows = (normalizedUpdates.inventory as InventoryItem[]).map((item) => ({
-              company_id: companyId,
-              sku: item.sku,
-              name: item.product,
-              description: item.description || null,
-              category: item.dept || 'General',
-              unit_cost: item.unitCost || 0,
-              average_cost: item.averageCost ?? item.unitCost ?? 0,
-              unit_price: item.sellingPrice ?? item.unitCost ?? 0,
-              stock_qty: item.closing || 0,
-              reserved_qty: item.reserved || 0,
-              expiry_date: item.expiryDate || null,
-              damaged_expired: item.damagedExpired || 0,
-              reorder_level: item.reorderLevel || 0,
-              reorder_quantity: item.reorderQuantity || 0,
-              maximum_stock_level: item.maximumStockLevel || 0,
-              branch: item.branch || null,
-              deleted_at: (item as any).deletedAt || null,
-              purge_after: (item as any).purgeAfter || null,
-              updated_at: new Date().toISOString(),
-            }))
-            const { error: inventoryPersistErr } = await supabase.from('products').upsert(inventoryRows, { onConflict: 'sku' })
+            const inventoryRows = (normalizedUpdates.inventory as InventoryItem[]).map(item => inventoryToRow(item, companyId))
+            const { error: inventoryPersistErr } = await supabase.from('products').upsert(inventoryRows, { onConflict: 'company_id,sku' })
             if (inventoryPersistErr) throw inventoryPersistErr
           }
 
@@ -1614,6 +1601,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     if (uniqueSkus.length === 0) return
 
     const purgeAfter = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    if (!supabase || !user?.companyId) throw new Error('Sign in to a connected company before deleting inventory.')
     if (supabase && user?.companyId) {
       const { error } = await supabase
         .from('products')
@@ -1624,7 +1612,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     }
 
     const deleted = new Set(uniqueSkus)
-    updateState({ inventory: state.inventory.filter((item) => !deleted.has(item.sku || '')) })
+    updateState({ inventory: state.inventory.filter((item) => !deleted.has(item.sku || '')) }, {persist: false})
   }
 
   const login = (userData: User, remember: boolean) => {

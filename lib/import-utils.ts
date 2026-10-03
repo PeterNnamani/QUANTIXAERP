@@ -484,7 +484,7 @@ export async function parseSpreadsheetFile(file: File): Promise<ImportRecord[]> 
 
     if (extension === 'csv') {
         const text = await file.text()
-        workbook = XLSX.read(text, { type: 'string' })
+        workbook = XLSX.read(text, { type: 'string', raw: true })
     } else {
         const buffer = await file.arrayBuffer()
         workbook = XLSX.read(buffer, { type: 'array' })
@@ -498,8 +498,15 @@ export async function parseSpreadsheetFile(file: File): Promise<ImportRecord[]> 
         const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
         if (sheetRows.length > 0) {
             const normalizedSheetName = sheetName.trim()
-            const rowsWithCategory = sheetRows.map((row) => ({
-                ...normalizeRowKeys(row),
+            const rowsWithCategory = sheetRows.map((row, index) => ({
+                __sheet: sheetName, __row: (row as any).__rowNum__ !== undefined ? Number((row as any).__rowNum__) + 1 : index + 2,
+                ...Object.fromEntries(Object.entries(normalizeRowKeys(row)).map(([key, value]) => {
+                    if (['expiry date', 'expiry', 'manufacturing date'].includes(key) && typeof value === 'number') {
+                        const date = XLSX.SSF.parse_date_code(value)
+                        if (date) return [key, `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`]
+                    }
+                    return [key, value]
+                })),
                 sheetCategory: normalizedSheetName,
                 category: (() => {
                     const normalizedRow = normalizeRowKeys(row)

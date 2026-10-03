@@ -1,6 +1,9 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import {saveOpeningBalances} from '@/lib/opening-balances'
+import {saveBankSettings} from '@/lib/bank-settings'
+import {getSupabaseClient} from '@/lib/supabase.browser'
 import AppLayout from '@/components/layout/app-layout'
 import BulkImport from '@/components/bulk-import'
 import { useAccounting, type BankAccount, type CompanySettings, type UserSettings } from '@/lib/context'
@@ -31,7 +34,10 @@ export default function SettingsPage() {
   const [userSettings, setUserSettings] = useState<UserSettings>({ ...defaultUserSettings, ...(user?.userSettings || {}), notifications: { ...defaultUserSettings.notifications, ...(user?.userSettings?.notifications || {}) } })
   const [userSettingsStatus, setUserSettingsStatus] = useState<{ tone: 'error' | 'success'; message: string } | null>(null)
   const companySettings = state.companySettings
+  const [openingBusy, setOpeningBusy] = useState(false)
+  const [bankBusy, setBankBusy] = useState(false)
   const [openingCapital, setOpeningCapital] = useState(state.openingCapital)
+  useEffect(() => { setOpeningCapital(state.openingCapital) }, [state.openingCapital])
   const [openingBalanceDrafts, setOpeningBalanceDrafts] = useState<Record<string, number>>({})
   const [openingDateDrafts, setOpeningDateDrafts] = useState<Record<string, string>>({})
   const [activeSection, setActiveSection] = useState('security')
@@ -93,10 +99,20 @@ export default function SettingsPage() {
     updateCompanySettings({ [section]: { ...companySettings[section], ...updates } } as Pick<CompanySettings, K>)
   }
 
-  const handleSaveOpeningCapital = () => {
-    const value = parseFloat(openingCapital as any) || 0
-    updateState({ openingCapital: value, companySettings: { ...companySettings, openingCapital: value } })
-    setSettingsNotice({ tone: 'success', message: 'Opening capital saved.' })
+  const handleSaveOpeningCapital = async () => {
+    setOpeningBusy(true); setSettingsNotice(null)
+    try {
+      const value = Number(openingCapital)
+      if (!Number.isFinite(value) || value < 0) throw new Error('Enter a valid opening capital.')
+      const client = getSupabaseClient()
+      if (!client || !user?.companyId) throw new Error('Sign in to a connected company.')
+      const settings = {...companySettings, openingCapital: value}
+      const {error} = await client.from('companies').update({settings}).eq('id', user.companyId).select('id').single()
+      if (error) throw new Error(error.message)
+      updateState({openingCapital: value, companySettings: settings}, {persist: false})
+      setSettingsNotice({tone: 'success', message: 'Opening capital saved to the database.'})
+    } catch(error) {setSettingsNotice({tone: 'error', message: error instanceof Error ? error.message : 'Save failed.'})}
+    finally {setOpeningBusy(false)}
   }
 
   const financialPositionAccounts = useMemo(() => {
@@ -104,7 +120,9 @@ export default function SettingsPage() {
     return dedupeChartOfAccounts([...state.chartOfAccounts, ...missingAccounts]).filter((account) => ['ASSET', 'LIABILITY', 'EQUITY'].includes(account.accountType))
   }, [state.chartOfAccounts])
 
-  const handleSaveOpeningBalances = () => {
+  const handleSaveOpeningBalances = async () => {
+    setOpeningBusy(true); setSettingsNotice(null)
+    try {
     const mergedChartOfAccounts = dedupeChartOfAccounts([
       ...state.chartOfAccounts,
       ...requiredFinancialPositionAccounts.map((account) => ({ ...account, openingBalance: 0, openingBalanceDate: null })),
@@ -116,9 +134,13 @@ export default function SettingsPage() {
         openingBalanceDate: openingDateDrafts[account.id] ?? account.openingBalanceDate ?? null,
       }
     })
-    updateState({ chartOfAccounts: mergedChartOfAccounts })
+    const result = await saveOpeningBalances(getSupabaseClient(), user?.companyId || '', mergedChartOfAccounts)
+    updateState({chartOfAccounts: result.accounts, journalLines: state.journalLines.map(line => ({...line, accountId: result.ids[line.accountId] || line.accountId}))}, {persist: false})
+    setOpeningBalanceDrafts({}); setOpeningDateDrafts({})
     addAuditLog('UPDATE', 'ACCOUNTING', 'OPENING_BALANCES', 'Financial-position opening balances updated.')
-    setSettingsNotice({ tone: 'success', message: 'Opening balances saved.' })
+    setSettingsNotice({ tone: 'success', message: 'Opening balances saved to the database.' })
+    } catch(error) {setSettingsNotice({tone: 'error', message: error instanceof Error ? error.message : 'Save failed.'})}
+    finally {setOpeningBusy(false)}
   }
 
   const openImportModal = () => {
@@ -392,7 +414,7 @@ export default function SettingsPage() {
     }
   }
 
-  const handleCreateBank = () => {
+  const handleCreateBank = async () => {
     const institution = newBankName.trim()
     const accountName = newBankAccountName.trim()
     if (!institution || !accountName) {
@@ -410,7 +432,11 @@ export default function SettingsPage() {
       currency: newBankCurrency, branch: '', openingBalance: newBankOpeningBalance,
       openingBalanceDate: newBankOpeningDate, balance: newBankOpeningBalance, status: 'active',
     }
-    updateState({ banks: { ...state.banks, [account.name]: account.balance }, bankAccounts: [...state.bankAccounts, account] })
+    setBankBusy(true)
+    try {await saveBankSettings(getSupabaseClient(), user?.companyId || '', account)}
+    catch(error) {setBankCreationStatus(error instanceof Error ? error.message : 'Unable to save bank.'); return}
+    finally {setBankBusy(false)}
+    updateState({ banks: { ...state.banks, [account.name]: account.balance }, bankAccounts: [...state.bankAccounts, account] }, {persist: false})
     addAuditLog('CREATE', 'BANK', accountKey, `Created ${newBankAccountType.toLowerCase()} bank account.`)
     setNewBankName(''); setNewBankAccountName(''); setNewBankAccountNumber(''); setNewBankAccountType('Current')
     setNewBankCurrency('NGN'); setNewBankOpeningBalance(0); setNewBankOpeningDate(new Date().toISOString().slice(0, 10))
@@ -435,7 +461,7 @@ export default function SettingsPage() {
     })
   }
 
-  const handleSaveBank = () => {
+  const handleSaveBank = async () => {
     const original = state.bankAccounts.find((account) => account.id === editingBankId)
     if (!original) return
     const institution = bankDraft.institution.trim()
@@ -463,6 +489,10 @@ export default function SettingsPage() {
       balance: bankDraft.balance,
       status: bankDraft.status,
     }
+    setBankBusy(true)
+    try {await saveBankSettings(getSupabaseClient(), user?.companyId || '', updated)}
+    catch(error) {setBankEditStatus(error instanceof Error ? error.message : 'Unable to save bank.'); return}
+    finally {setBankBusy(false)}
     const banks = { ...state.banks }
     delete banks[original.name]
     banks[accountKey] = updated.balance
@@ -470,7 +500,7 @@ export default function SettingsPage() {
       banks,
       bankAccounts: state.bankAccounts.map((account) => (account.id === original.id ? updated : account)),
       ...(renamed ? { bankTxns: state.bankTxns.map((txn) => (txn.bank === original.name ? { ...txn, bank: accountKey } : txn)) } : {}),
-    })
+    }, {persist: false})
     addAuditLog('UPDATE', 'BANK', accountKey, renamed ? `Updated bank account details (renamed from ${original.name}).` : 'Updated bank account details.')
     setEditingBankId(null)
     setBankCreationStatus(`${accountKey} was updated. Bank Balances now shows the new details.`)
@@ -591,8 +621,8 @@ export default function SettingsPage() {
                   <div className="fg">
                     <label>Opening balance / capital</label>
                     <div className="inline-actions">
-                      <input type="number" value={openingCapital} onChange={(e) => setOpeningCapital(parseFloat(e.target.value) || 0)} />
-                      <button className="action-btn primary" onClick={handleSaveOpeningCapital}>Save</button>
+                      <input type="number" step="0.01" min={0} value={openingCapital} onChange={(e) => setOpeningCapital(parseFloat(e.target.value) || 0)} />
+                      <button className="action-btn primary" disabled={openingBusy} onClick={() => void handleSaveOpeningCapital()}>{openingBusy ? 'Saving…' : 'Save'}</button>
                     </div>
                     <div className="metric-note">Current: {formatCurrency(state.openingCapital)}</div>
                   </div>
@@ -608,7 +638,7 @@ export default function SettingsPage() {
                     <div className="panel-title">Financial-position opening balances</div>
                     <div className="panel-subtitle">Enter the balances brought forward for every asset, liability, and equity account.</div>
                   </div>
-                  <button className="action-btn primary" type="button" onClick={handleSaveOpeningBalances}>Save opening balances</button>
+                  <button className="action-btn primary" type="button" disabled={openingBusy} onClick={() => void handleSaveOpeningBalances()}>{openingBusy ? 'Saving…' : 'Save opening balances'}</button>
                 </div>
                 {settingsNotice && <div className={`staff-inline-notice ${settingsNotice.tone}`}>{settingsNotice.message}</div>}
                 <div className="bank-account-register">
@@ -691,7 +721,7 @@ export default function SettingsPage() {
                   <div className="fg"><label>Opening balance date</label><input type="date" value={newBankOpeningDate} onChange={(event) => setNewBankOpeningDate(event.target.value)} /></div>
                 </div>
                 {bankCreationStatus && <div className="metric-note">{bankCreationStatus}</div>}
-                <button className="action-btn primary" type="button" onClick={handleCreateBank}>Create bank account</button>
+                <button className="action-btn primary" type="button" disabled={bankBusy} onClick={() => void handleCreateBank()}>Create bank account</button>
                 <div className="bank-account-register settings-bank-register">
                   <div className="bank-register-row bank-register-head"><span>Account</span><span>Type</span><span>Opening balance</span><span>Status</span><span /></div>
                   {state.bankAccounts.map((account) => (
@@ -706,14 +736,14 @@ export default function SettingsPage() {
                             <div className="fg"><label>Account type</label><select value={bankDraft.accountType} onChange={(event) => setBankDraft({ ...bankDraft, accountType: event.target.value })}>{['Current', 'Savings', 'Cash', 'Wallet', 'Other', ...(['Current', 'Savings', 'Cash', 'Wallet', 'Other'].includes(bankDraft.accountType) ? [] : [bankDraft.accountType])].map((type) => <option key={type}>{type}</option>)}</select></div>
                             <div className="fg"><label>Currency</label><select value={bankDraft.currency} onChange={(event) => setBankDraft({ ...bankDraft, currency: event.target.value })}>{['NGN', 'USD', 'GBP', ...(['NGN', 'USD', 'GBP'].includes(bankDraft.currency) ? [] : [bankDraft.currency])].map((currency) => <option key={currency}>{currency}</option>)}</select></div>
                             <div className="fg"><label>Branch <small>(optional)</small></label><input value={bankDraft.branch} onChange={(event) => setBankDraft({ ...bankDraft, branch: event.target.value })} /></div>
-                            <div className="fg"><label>Opening balance</label><input type="number" min={0} step="0.01" value={bankDraft.openingBalance} onChange={(event) => setBankDraft({ ...bankDraft, openingBalance: Number(event.target.value || 0) })} /></div>
+                            <div className="fg"><label>Opening balance</label><input type="number" min={0} step="0.01" value={bankDraft.openingBalance} onChange={(event) => setBankDraft({ ...bankDraft, openingBalance: Number(event.target.value || 0), balance: bankDraft.balance + Number(event.target.value || 0) - bankDraft.openingBalance })} /></div>
                             <div className="fg"><label>Opening balance date</label><input type="date" value={bankDraft.openingBalanceDate} onChange={(event) => setBankDraft({ ...bankDraft, openingBalanceDate: event.target.value })} /></div>
                             <div className="fg"><label>Available balance</label><input type="number" min={0} step="0.01" value={bankDraft.balance} onChange={(event) => setBankDraft({ ...bankDraft, balance: Number(event.target.value || 0) })} /></div>
                             <div className="fg"><label>Status</label><select value={bankDraft.status} onChange={(event) => setBankDraft({ ...bankDraft, status: event.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
                           </div>
                           {bankEditStatus && <div className="metric-note">{bankEditStatus}</div>}
                           <div className="bank-edit-actions">
-                            <button className="action-btn primary" type="button" onClick={handleSaveBank}>Save changes</button>
+                            <button className="action-btn primary" type="button" disabled={bankBusy} onClick={() => void handleSaveBank()}>Save changes</button>
                             <button className="action-btn secondary" type="button" onClick={() => setEditingBankId(null)}>Cancel</button>
                           </div>
                         </div>
