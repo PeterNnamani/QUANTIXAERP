@@ -1,18 +1,12 @@
-'use client'
-
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
-import { findStaffMemberByLogin, savedMenuAccess } from '@/lib/rbac'
-import { findUserInDatabase, recordUserLogin } from '@/lib/user-db'
-
-const AUTH_KEY = 'hw_auth_user'
-
-// Demo credentials removed; only real database-backed users allowed.
+import { savedMenuAccess } from '@/lib/rbac'
+import styles from './login.module.css'
 
 export default function LoginPage() {
   const router = useRouter()
-  const { login, user, state } = useAccounting()
+  const { login, user } = useAccounting()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [rememberMe, setRememberMe] = useState(true)
@@ -28,9 +22,7 @@ export default function LoginPage() {
   }, [])
 
   useEffect(() => {
-    if (user) {
-      router.replace('/dashboard')
-    }
+    if (user) router.replace('/dashboard')
   }, [user, router])
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -38,140 +30,223 @@ export default function LoginPage() {
     setError('')
     setIsLoading(true)
 
-    const normalizedUsername = username.trim().toUpperCase()
+    const normalizedUsername = username.trim()
     const normalizedPin = password.trim()
 
     const saveRememberedUsername = (remember: boolean) => {
-      if (remember) {
-        localStorage.setItem('hw_remembered_username', username)
-      } else {
-        localStorage.removeItem('hw_remembered_username')
-      }
+      if (remember) localStorage.setItem('hw_remembered_username', username)
+      else localStorage.removeItem('hw_remembered_username')
     }
 
     try {
-      const matchedStaff = findStaffMemberByLogin(state.staffMembers, normalizedUsername, normalizedPin)
-      const databaseUser = await findUserInDatabase(normalizedUsername, normalizedPin, state.roles)
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: normalizedUsername, pin: normalizedPin }),
+      })
 
-      const localAccess = matchedStaff ? savedMenuAccess({ ...matchedStaff, role: matchedStaff.roleId }) : null
-      const databaseAccess = databaseUser && databaseUser.accessLevels !== undefined
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        setError(json.error || 'Invalid username or password')
+        return
+      }
+
+      const raw = json.user
+      if (!raw) {
+        setError('Invalid username or password')
+        return
+      }
+
+      const databaseUser = {
+        id: raw.id,
+        companyId: raw.company_id,
+        name: raw.full_name,
+        role: raw.role,
+        roleId: raw.role,
+        roleName: raw.role_title || raw.role,
+        staffId: raw.staff_id,
+        username: raw.username,
+        branch: raw.branch,
+        department: raw.department,
+        position: raw.position,
+        accessLevels: raw.access_levels,
+        status: raw.status,
+      }
+
+      const menuAccess =
+        databaseUser.accessLevels !== undefined && databaseUser.accessLevels !== null
           ? savedMenuAccess({ accessLevels: databaseUser.accessLevels, role: databaseUser.role })
           : null
-      const menuAccess = localAccess || databaseAccess
 
-      if (databaseUser) {
-        void recordUserLogin(databaseUser)
-        saveRememberedUsername(rememberMe)
-        login(menuAccess ? { ...databaseUser, ...menuAccess } : databaseUser, rememberMe)
-        router.push('/dashboard')
-      } else if (matchedStaff) {
-        saveRememberedUsername(rememberMe)
-        login({
-          name: matchedStaff.name,
-          role: matchedStaff.roleId,
-          roleId: matchedStaff.roleId,
-          roleName: matchedStaff.roleName,
-          staffId: matchedStaff.staffId,
-          permissions: menuAccess?.permissions || matchedStaff.permissions,
-          visibleMenus: menuAccess?.visibleMenus || matchedStaff.visibleMenus,
-          accessLevels: menuAccess?.accessLevels || matchedStaff.accessLevels,
-          dataScope: matchedStaff.dataScope,
-        }, rememberMe)
-        router.push('/dashboard')
-      } else {
-        setError('Invalid username or password')
-      }
-    } catch (error) {
-      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
-      setError(timedOut ? 'Sign-in is taking too long. Check the connection and try again.' : error instanceof Error ? error.message : 'Unable to sign in. Try again.')
+      saveRememberedUsername(rememberMe)
+      login(menuAccess ? { ...databaseUser, ...menuAccess } : databaseUser, rememberMe)
+      router.push('/dashboard')
+    } catch (err) {
+      const timedOut =
+        err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
+      setError(
+        timedOut
+          ? 'Sign-in is taking too long. Check the connection and try again.'
+          : err instanceof Error
+          ? err.message
+          : 'Unable to sign in. Try again.'
+      )
     } finally {
       setIsLoading(false)
     }
   }
 
-  // Onboarding handled on the dedicated /onboard page
-
   return (
-    <div className="auth-hero">
-      <div className="hero-left">
-        <div className="hero-copy">
-          <span className="hero-eyebrow">Quantixa accounting</span>
-          <h2>Welcome to fast, modern bookkeeping</h2>
-          <p>Manage smarter, grow stronger, and get your finance workflows set up with accurate, efficient accounting tools.</p>
-        </div>
-      </div>
-
-      <div className="auth-card">
-        <div className="panel-header" style={{ alignItems: 'center', gap: 10 }}>
-          <div className="login-mark" style={{ width: 72, height: 72, borderRadius: 12 }}>
-            <img src="/quantixa.png" alt="Quantixa logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+    <div className={styles.shell}>
+      {/* Left hero */}
+      <aside className={styles.hero}>
+        <div className={styles.brand}>
+          <div className={styles.brandMark}>
+            <img src="/quantixa.png" alt="" />
           </div>
-          <div>
-            <div className="panel-eyebrow">QUANTIXA</div>
-            <h1 className="panel-title">Log In to your account</h1>
-            <p className="panel-copy">Sign in with your staff ID and PIN to continue.</p>
-          </div>
+          <span className={styles.brandName}>Quantixa</span>
         </div>
 
-        <form onSubmit={handleLogin} style={{ marginTop: 8 }}>
-          {error && (
-            <div className="alert a-red" style={{ marginBottom: '12px' }}>
-              <span style={{ flex: 1 }}>{error}</span>
+        <div className={styles.heroCopy}>
+          <span className={styles.heroEyebrow}>Accounting, refined</span>
+          <h2 className={styles.heroTitle}>
+            Modern account keeping for teams that move fast.
+          </h2>
+          <p className={styles.heroSub}>
+            Manage smarter, grow stronger, and run your finance workflows with
+            accurate, efficient accounting tools.
+          </p>
+        </div>
+
+        <div className={styles.heroFooter}>
+          <span className={styles.dot} aria-hidden />
+          All systems operational
+        </div>
+      </aside>
+
+      {/* Right card */}
+      <main className={styles.cardSide}>
+        <div className={styles.card}>
+          <header className={styles.cardHeader}>
+            <div className={styles.cardMark}>
+              <img src="/quantixa.png" alt="" />
             </div>
-          )}
+            <div>
+              <h1 className={styles.cardTitle}>Log in to your account</h1>
+              <p className={styles.cardSub}>Sign in with your staff ID and PIN.</p>
+            </div>
+          </header>
 
-          <div className="fg" style={{ marginBottom: '12px' }}>
-            <label>Staff ID</label>
-            <input
-              type="text"
-              placeholder="Enter your staff ID or demo username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+          <form onSubmit={handleLogin} noValidate>
+            {error && (
+              <div className={styles.error} role="alert">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                  strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>{error}</span>
+              </div>
+            )}
+
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="login-username">
+                Staff ID
+              </label>
+              <div className={styles.inputWrap}>
+                <svg className={styles.inputIcon} viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                  strokeLinejoin="round">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                  <circle cx="12" cy="7" r="4" />
+                </svg>
+                <input
+                  id="login-username"
+                  className={styles.input}
+                  type="text"
+                  autoComplete="username"
+                  placeholder="e.g. STF-18973362-6176"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={isLoading}
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="login-pin">
+                PIN
+              </label>
+              <div className={styles.inputWrap}>
+                <svg className={styles.inputIcon} viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                  strokeLinejoin="round">
+                  <rect x="4" y="11" width="16" height="9" rx="2" />
+                  <path d="M8 11V7a4 4 0 1 1 8 0v4" />
+                </svg>
+                <input
+                  id="login-pin"
+                  className={styles.input}
+                  type="password"
+                  autoComplete="current-password"
+                  inputMode="numeric"
+                  placeholder="Enter your 4-digit PIN"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={isLoading}
+                />
+              </div>
+            </div>
+
+            <div className={styles.row}>
+              <label className={styles.remember}>
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                />
+                Remember me
+              </label>
+              <button
+                type="button"
+                className={styles.link}
+                onClick={() => router.push('/onboard')}
+              >
+                Create company
+              </button>
+            </div>
+
+            <button
+              type="submit"
+              className={styles.submit}
               disabled={isLoading}
-              autoFocus
-            />
-          </div>
+            >
+              {isLoading ? (
+                <>
+                  <span className={styles.spinner} aria-hidden />
+                  Logging in…
+                </>
+              ) : (
+                'Log in'
+              )}
+            </button>
+          </form>
 
-          <div className="fg" style={{ marginBottom: '14px' }}>
-            <label>PIN</label>
-            <input
-              type="password"
-              placeholder="Enter your 4-digit PIN"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={isLoading}
-            />
+          <div className={styles.notice}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+              strokeLinejoin="round">
+              <rect x="6" y="10" width="12" height="9" rx="2" />
+              <path d="M8 10V7a4 4 0 1 1 8 0v3" />
+            </svg>
+            <span>Protected access. Sign in with an authorized account only.</span>
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <label className="remember-label">
-              <input
-                type="checkbox"
-                checked={rememberMe}
-                onChange={(e) => setRememberMe(e.target.checked)}
-              />
-              <span style={{ marginLeft: 8 }}>Remember me</span>
-            </label>
-            <button type="button" className="link" onClick={() => router.push('/onboard')}>Create company</button>
-          </div>
-          <button
-            type="submit"
-            className="btn btn-primary"
-            style={{ width: '100%', justifyContent: 'center', marginBottom: '6px' }}
-            disabled={isLoading}
-          >
-            {isLoading ? 'Logging in...' : 'Log In'}
-          </button>
-        </form>
-
-        <div className="alert a-blue login-protect-note" style={{ marginTop: 14 }}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '18px', height: '18px', flexShrink: 0 }}>
-            <rect x="6" y="10" width="12" height="9" rx="2" />
-            <path d="M8 10V7a4 4 0 1 1 8 0v3" />
-          </svg>
-          <span>Protected access only. Please sign in with your authorized account.</span>
         </div>
-      </div>
+      </main>
     </div>
   )
 }
