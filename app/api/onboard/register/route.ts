@@ -1,117 +1,148 @@
 import { NextResponse } from 'next/server'
-import { supabaseAdmin } from '@/lib/supabase.server'
-import { buildSeedChartOfAccounts } from '@/lib/accounting/chart-of-accounts'
-import { buildSeedAccountingPeriods } from '@/lib/accounting/periods'
-import { getTrialEndDate, TRIAL_PLAN } from '@/lib/licensing'
+import { createClient } from '@supabase/supabase-js'
+import { hashPin, isValidPin } from '@/lib/pin'
 
-export async function POST(request: Request) {
-    try {
-        const body = await request.json()
-        const { companyName, adminFullName, adminEmail, staffId, username, pin } = body || {}
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SECRET_KEY!,
+  { auth: { persistSession: false, autoRefreshToken: false } }
+)
 
-        if (!supabaseAdmin) {
-            return NextResponse.json({ ok: false, error: 'Supabase admin client is not configured' }, { status: 500 })
-        }
+type SignupBody = {
+  companyName?: string
+  fullName?: string
+  email?: string
+  pin?: string
+  username?: string
+  role?: string
+  roleTitle?: string
+}
 
-        // Allow onboarding for multiple companies. Multiple super-admins are permitted in this multi-company app.
-        const now = new Date().toISOString()
+function generateStaffId(): string {
+  const rand = Math.random().toString(36).slice(2, 10).toUpperCase()
+  return `STF-${Date.now().toString().slice(-8)}-${rand.slice(0, 4)}`
+}
 
-        // Generate a staff ID if not provided
-        const generatedStaffId = staffId && String(staffId).trim().length > 0 ? String(staffId).trim() : `STF-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 9000 + 1000)}`
+export async function POST(req: Request) {
+  // --- Guard: environment ---
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) {
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 })
+  }
 
-        const { data: company, error: companyErr } = await supabaseAdmin
-            .from('companies')
-            .insert({ name: String(companyName).trim(), created_at: now, updated_at: now })
-            .select('id,name')
-            .single()
+  // --- Parse ---
+  let body: SignupBody
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  }
 
-        if (companyErr || !company) {
-            return NextResponse.json({ ok: false, error: companyErr?.message || 'Unable to create company' }, { status: 500 })
-        }
+  const companyName = (body.companyName || '').trim()
+  const fullName = (body.fullName || '').trim()
+  const email = (body.email || '').trim().toLowerCase()
+  const pin = (body.pin || '').trim()
+  const username = (body.username || '').trim().toLowerCase()
+  const role = (body.role || 'business-owner').trim()
+  const roleTitle = (body.roleTitle || 'Business Owner').trim()
 
-        // Insert the super-admin user
-        const { error: userErr } = await supabaseAdmin.from('users').insert({
-            company_id: company.id,
-            staff_id: generatedStaffId,
-            username: username,
-            pin: pin,
-            email: adminEmail ?? `${username}@local`,
-            full_name: adminFullName,
-            role: 'business-owner',
-            status: 'active',
-            created_at: now,
-            updated_at: now,
-        })
+  // --- Validate ---
+  if (!companyName || !fullName || !email || !pin || !username) {
+    return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+  }
+  if (!isValidPin(pin)) {
+    return NextResponse.json({ error: 'PIN must be exactly 6 digits' }, { status: 400 })
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return NextResponse.json({ error: 'Invalid email' }, { status: 400 })
+  }
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+    return NextResponse.json(
+      { error: 'Username must be 3-32 chars: letters, digits, dot, underscore, dash' },
+      { status: 400 }
+    )
+  }
 
-        if (userErr) {
-            return NextResponse.json({ ok: false, error: userErr.message }, { status: 500 })
-        }
+  // --- 1. Create auth user ---
+  const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password: pin,
+    email_confirm: true,
+  })
 
-        const trialEndsAt = getTrialEndDate(now)
-        const { error: trialErr } = await supabaseAdmin.from('subscriptions').insert({
-            company_id: company.id,
-            plan_name: TRIAL_PLAN,
-            status: 'trial',
-            amount: 0,
-            starts_at: now,
-            expires_at: trialEndsAt?.toISOString() || null,
-            created_at: now,
-            updated_at: now,
-        })
+  if (authErr || !authData?.user) {
+    const msg = authErr?.message || 'Failed to create auth user'
+    const status = /already|exists|registered/i.test(msg) ? 409 : 500
+    return NextResponse.json({ error: msg }, { status })
+  }
 
-        if (trialErr) {
-            return NextResponse.json({ ok: false, error: trialErr.message }, { status: 500 })
-        }
+  const authUserId = authData.user.id
 
-        // Seed basic chart of accounts
-        try {
-            const chart = buildSeedChartOfAccounts().map((a) => ({
-                code: a.code,
-                name: a.name,
-                account_type: a.accountType || a.account_type,
-                account_subtype: a.accountSubType || a.account_subtype || null,
-                normal_balance: a.normalBalance || a.normal_balance || 'DEBIT',
-                is_control_account: Boolean(a.isControlAccount),
-                is_active: a.isActive !== false,
-                currency: a.currency || 'NGN',
-                company_id: company.id,
-                created_at: now,
-                updated_at: now,
-            }))
+  // --- 2. Hash the PIN before we write anything else. If this fails, we
+  //        delete the auth user and return, so no orphan rows are left. ---
+  let pinHash: string
+  try {
+    pinHash = await hashPin(pin)
+  } catch (err) {
+    await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
+    return NextResponse.json(
+      {
+        error: 'Failed to secure PIN',
+        detail: err instanceof Error ? err.message : 'unknown',
+      },
+      { status: 500 }
+    )
+  }
 
-            await supabaseAdmin.from('chart_of_accounts').insert(chart)
-        } catch (e) {
-            // non-fatal; continue
-            console.warn('Unable to seed chart of accounts', e)
-        }
+  // --- 3. Create company ---
+  const { data: company, error: companyErr } = await supabaseAdmin
+    .from('companies')
+    .insert({ name: companyName })
+    .select('id, name')
+    .single()
 
-        // Seed initial accounting period
-        try {
-            const periods = buildSeedAccountingPeriods().map((p) => ({
-                fiscal_year: p.fiscalYear || p.fiscal_year,
-                period_number: p.periodNumber || p.period_number,
-                start_date: p.startDate || p.start_date,
-                end_date: p.endDate || p.end_date,
-                status: p.status || 'OPEN',
-                company_id: company.id,
-                created_at: now,
-                updated_at: now,
-            }))
+  if (companyErr || !company) {
+    await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
+    return NextResponse.json(
+      { error: 'Failed to create company', detail: companyErr?.message },
+      { status: 500 }
+    )
+  }
 
-            await supabaseAdmin.from('accounting_periods').insert(periods)
-        } catch (e) {
-            console.warn('Unable to seed accounting periods', e)
-        }
+  // --- 4. Create public.users row ---
+  const staffId = generateStaffId()
+  const { data: user, error: userErr } = await supabaseAdmin
+    .from('users')
+    .insert({
+      company_id: company.id,
+      auth_user_id: authUserId,
+      email,
+      full_name: fullName,
+      role,
+      role_title: roleTitle,
+      staff_id: staffId,
+      username,
+      pin: null,          // no plaintext going forward
+      pin_hash: pinHash,  // bcrypt hash
+      status: 'active',
+    })
+    .select(
+      'id, company_id, email, full_name, role, role_title, staff_id, username, status, access_levels, branch, department, position'
+    )
+    .single()
 
-        // Optionally create a bank_accounts placeholder
-        try {
-            await supabaseAdmin.from('bank_accounts').insert([{ company_id: company.id, name: `${companyName} - Cash`, institution: companyName ?? 'Company', balance: 0, currency: 'NGN', status: 'active', created_at: now, updated_at: now }])
-        } catch (e) {
-            console.warn('Unable to create default bank account', e)
-        }
+  if (userErr || !user) {
+    // Compensating cleanup: drop the company and the auth user.
+    await supabaseAdmin.from('companies').delete().eq('id', company.id)
+    await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
+    return NextResponse.json(
+      { error: 'Failed to create user profile', detail: userErr?.message },
+      { status: 500 }
+    )
+  }
 
-        return NextResponse.json({ ok: true, message: 'Onboarding completed' })
-    } catch (err) {
-        return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 })
-    }
+  // --- Success ---
+  return NextResponse.json({
+    user,
+    company: { id: company.id, name: company.name },
+  })
 }

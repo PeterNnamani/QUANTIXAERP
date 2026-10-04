@@ -1,3 +1,5 @@
+'use client'
+
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
@@ -134,7 +136,7 @@ export default function LoginPage() {
             </div>
             <div>
               <h1 className={styles.cardTitle}>Log in to your account</h1>
-              <p className={styles.cardSub}>Sign in with your staff ID and PIN.</p>
+              <p className={styles.cardSub}>Sign in with your username or staff ID and PIN.</p>
             </div>
           </header>
 
@@ -154,7 +156,7 @@ export default function LoginPage() {
 
             <div className={styles.field}>
               <label className={styles.label} htmlFor="login-username">
-                Staff ID
+                Username or Staff ID
               </label>
               <div className={styles.inputWrap}>
                 <svg className={styles.inputIcon} viewBox="0 0 24 24" fill="none"
@@ -168,7 +170,7 @@ export default function LoginPage() {
                   className={styles.input}
                   type="text"
                   autoComplete="username"
-                  placeholder="e.g. STF-18973362-6176"
+                  placeholder="e.g. adatst or STF-33573726-DUH1"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   disabled={isLoading}
@@ -194,9 +196,10 @@ export default function LoginPage() {
                   type="password"
                   autoComplete="current-password"
                   inputMode="numeric"
-                  placeholder="Enter your 4-digit PIN"
+                  maxLength={6}
+                  placeholder="Enter your 6-digit PIN"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => setPassword(e.target.value.replace(/\D/g, '').slice(0, 6))}
                   disabled={isLoading}
                 />
               </div>

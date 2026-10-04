@@ -3,143 +3,335 @@
 import React, { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
-import { findUserInDatabase } from '@/lib/user-db'
+import { savedMenuAccess } from '@/lib/rbac'
 import { ONBOARDING_COMPLETED_KEY } from '@/components/entry-page'
+import styles from '@/components/auth/login.module.css'
 
 export default function OnboardPage() {
-    const router = useRouter()
-    const searchParams = useSearchParams()
-    const { login, state } = useAccounting()
-    const selectedPlan = searchParams.get('plan')
-    const isTrial = searchParams.get('mode') === 'trial' || !selectedPlan
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const { login } = useAccounting()
 
-    const [companyName, setCompanyName] = useState('')
-    const [adminFullName, setAdminFullName] = useState('')
-    const [adminEmail, setAdminEmail] = useState('')
-    const [username, setUsername] = useState('')
-    const [pin, setPin] = useState('')
-    const [error, setError] = useState('')
-    const [loading, setLoading] = useState(false)
-    const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true)
+  const selectedPlan = searchParams.get('plan')
+  const isTrial = searchParams.get('mode') === 'trial' || !selectedPlan
 
-    useEffect(() => {
-        if (window.localStorage.getItem(ONBOARDING_COMPLETED_KEY) === 'true') {
-            router.replace('/login')
-            return
-        }
+  const [companyName, setCompanyName] = useState('')
+  const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
+  const [pin, setPin] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true)
 
-        setIsCheckingOnboarding(false)
-    }, [router])
+  useEffect(() => {
+    if (window.localStorage.getItem(ONBOARDING_COMPLETED_KEY) === 'true') {
+      router.replace('/login')
+      return
+    }
+    setIsCheckingOnboarding(false)
+  }, [router])
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault()
-        setError('')
-        setLoading(true)
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
 
-        try {
-            const resp = await fetch('/api/onboard/register', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ companyName, adminFullName, adminEmail, username, pin }),
-            })
-            const data = await resp.json()
-            if (!resp.ok) {
-                setError(data.error || 'Registration failed')
-                setLoading(false)
-                return
-            }
-
-            window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, 'true')
-
-            // Try to auto-login the created admin
-            const dbUser = await findUserInDatabase((username).toUpperCase(), pin, state.roles)
-            if (dbUser) {
-                login(dbUser, true)
-                router.push(selectedPlan ? `/subscription-and-licensing?plan=${encodeURIComponent(selectedPlan)}` : '/dashboard')
-                return
-            }
-
-            setError('Registration complete. Please sign in.')
-        } catch (err) {
-            setError(err instanceof Error ? err.message : String(err))
-        }
-
-        setLoading(false)
+    // Client-side sanity checks (server re-validates)
+    if (!/^\d{6}$/.test(pin)) {
+      setError('PIN must be exactly 6 digits')
+      return
+    }
+    if (!/^[a-zA-Z0-9._-]{3,32}$/.test(username)) {
+      setError('Username must be 3-32 chars: letters, digits, dot, underscore, dash')
+      return
     }
 
-    if (isCheckingOnboarding) {
-        return <div style={{ minHeight: '100vh', background: '#f0f4fc' }} aria-hidden="true" />
+    setLoading(true)
+
+    try {
+      // 1. Create the account
+      const signupResp = await fetch('/api/onboard/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          companyName: companyName.trim(),
+          fullName: fullName.trim(),
+          email: email.trim().toLowerCase(),
+          username: username.trim().toLowerCase(),
+          pin,
+        }),
+      })
+
+      const signupData = await signupResp.json().catch(() => ({}))
+      if (!signupResp.ok) {
+        setError(signupData.error || 'Registration failed')
+        return
+      }
+
+      window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, 'true')
+
+      // 2. Auto-login via the auth-based route (v2)
+      const loginResp = await fetch('/api/auth/login-v2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: username.trim().toLowerCase(),
+          pin,
+        }),
+      })
+
+      const loginData = await loginResp.json().catch(() => ({}))
+      if (!loginResp.ok) {
+        // Account was created; just send them to login
+        setError(loginData.error || 'Account created. Please sign in.')
+        setTimeout(() => router.push('/login'), 1200)
+        return
+      }
+
+      const raw = loginData.user
+      if (!raw) {
+        setError('Account created. Please sign in.')
+        setTimeout(() => router.push('/login'), 1200)
+        return
+      }
+
+      // 3. Map server snake_case → app camelCase
+      const databaseUser = {
+        id: raw.id,
+        companyId: raw.company_id,
+        name: raw.full_name,
+        role: raw.role,
+        roleId: raw.role,
+        roleName: raw.role_title || raw.role,
+        staffId: raw.staff_id,
+        username: raw.username,
+        branch: raw.branch,
+        department: raw.department,
+        position: raw.position,
+        accessLevels: raw.access_levels,
+        status: raw.status,
+      }
+
+      const menuAccess =
+        databaseUser.accessLevels !== undefined && databaseUser.accessLevels !== null
+          ? savedMenuAccess({ accessLevels: databaseUser.accessLevels, role: databaseUser.role })
+          : null
+
+      login(menuAccess ? { ...databaseUser, ...menuAccess } : databaseUser, true)
+
+      router.push(
+        selectedPlan
+          ? `/subscription-and-licensing?plan=${encodeURIComponent(selectedPlan)}`
+          : '/dashboard'
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
     }
+  }
 
-    return (
-        <div className="auth-hero">
-            <div className="hero-left">
-                <div className="hero-copy">
-                    <span className="hero-eyebrow">Quantixa accounting</span>
-                    <h2>Welcome to fast, modern bookkeeping</h2>
-                    <p>Manage smarter, grow stronger, and get your finance workflows set up with accurate, efficient accounting tools.</p>
-                </div>
-            </div>
-            <div className="auth-card">
-                <div className="panel-header">
-                    <div className="login-mark" style={{ width: 72, height: 72, borderRadius: 12 }}>
-                        <img src="/quantixa.png" alt="Quantixa logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                    </div>
-                    <div>
-                        <div className="panel-eyebrow">QUANTIXA</div>
-                        <h1 className="panel-title" style={{ margin: 0 }}>{isTrial ? 'Start your free trial' : `Choose ${selectedPlan?.replace(' Edition', '')}`}</h1>
-                        <p className="panel-copy" style={{ margin: '0', maxWidth: '100%' }}>{isTrial ? 'Set up your company and explore the full QUANTIXA workspace for 14 days.' : 'Set up your company first. You will continue to secure checkout after your workspace is created.'}</p>
-                    </div>
-                </div>
+  if (isCheckingOnboarding) {
+    return <div style={{ minHeight: '100vh', background: '#0b1220' }} aria-hidden="true" />
+  }
 
-                <div style={{ height: 14 }} />
-                {error && (
-                    <div className="alert a-red" style={{ marginBottom: '12px' }}>{error}</div>
-                )}
-
-                <form onSubmit={handleSubmit} autoComplete="off">
-                    <div className="auth-form-grid" style={{ marginBottom: '12px' }}>
-                        <div className="fg">
-                            <label>Company name</label>
-                            <input name="companyName" autoComplete="off" value={companyName} onChange={(e) => setCompanyName(e.target.value)} disabled={loading} required placeholder="Enter company name" />
-                        </div>
-
-                        <div className="fg">
-                            <label>Admin full name</label>
-                            <input name="adminFullName" autoComplete="off" value={adminFullName} onChange={(e) => setAdminFullName(e.target.value)} disabled={loading} required placeholder="Enter admin full name" />
-                        </div>
-
-                        <div className="fg">
-                            <label>Admin email</label>
-                            <input name="adminEmail" autoComplete="off" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} disabled={loading} type="email" placeholder="Enter admin email" />
-                        </div>
-
-                        <div className="fg">
-                            <label>Username</label>
-                            <input name="username" autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} disabled={loading} required placeholder="Choose a username" />
-                        </div>
-
-                        <div className="fg full-width">
-                            <label>PIN (4-digit)</label>
-                            <input name="pin" autoComplete="new-password" value={pin} onChange={(e) => setPin(e.target.value)} disabled={loading} required maxLength={6} type="password" placeholder="Enter a secure PIN" />
-                        </div>
-                    </div>
-
-                    <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', marginBottom: '12px' }} disabled={loading}>{loading ? 'Registering...' : 'Create company'}</button>
-                </form>
-
-                <div className="alert a-blue login-protect-note">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '18px', height: '18px', flexShrink: 0 }}>
-                        <rect x="6" y="10" width="12" height="9" rx="2" />
-                        <path d="M8 10V7a4 4 0 1 1 8 0v3" />
-                    </svg>
-                    <span>Protected access only. Please create your company account with verified admin details.</span>
-                </div>
-
-                <div style={{ marginTop: 12 }}>
-                    <button type="button" className="link" onClick={() => router.push('/')} style={{ padding: 0 }}>Already have an account? Sign in</button>
-                </div>
-            </div>
+  return (
+    <div className={styles.shell}>
+      <aside className={styles.hero}>
+        <div className={styles.brand}>
+          <div className={styles.brandMark}>
+            <img src="/quantixa.png" alt="" />
+          </div>
+          <span className={styles.brandName}>Quantixa</span>
         </div>
-    )
+
+        <div className={styles.heroCopy}>
+          <span className={styles.heroEyebrow}>
+            {isTrial ? '14-day free trial' : 'Get started'}
+          </span>
+          <h2 className={styles.heroTitle}>
+            {isTrial
+              ? 'Set up your workspace in under a minute.'
+              : `Set up your workspace for ${selectedPlan?.replace(' Edition', '')}.`}
+          </h2>
+          <p className={styles.heroSub}>
+            {isTrial
+              ? 'Create your company, choose an admin account, and explore the full Quantixa workspace for 14 days.'
+              : 'Create your company first. You will continue to secure checkout once your workspace exists.'}
+          </p>
+        </div>
+
+        <div className={styles.heroFooter}>
+          <span className={styles.dot} aria-hidden />
+          All systems operational
+        </div>
+      </aside>
+
+      <main className={styles.cardSide}>
+        <div className={styles.card}>
+          <header className={styles.cardHeader}>
+            <div className={styles.cardMark}>
+              <img src="/quantixa.png" alt="" />
+            </div>
+            <div>
+              <h1 className={styles.cardTitle}>Create your company</h1>
+              <p className={styles.cardSub}>
+                Admin details and a 6-digit PIN to secure your account.
+              </p>
+            </div>
+          </header>
+
+          <form onSubmit={handleSubmit} autoComplete="off" noValidate>
+            {error && (
+              <div className={styles.error} role="alert">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                  strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>{error}</span>
+              </div>
+            )}
+
+            <div className={styles.formGrid}>
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="onboard-company">
+                  Company name
+                </label>
+                <div className={styles.inputWrap}>
+                  <input
+                    id="onboard-company"
+                    className={styles.input}
+                    name="companyName"
+                    autoComplete="off"
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                    disabled={loading}
+                    required
+                    placeholder="e.g. Acme Ltd"
+                  />
+                </div>
+              </div>
+
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="onboard-fullname">
+                  Admin full name
+                </label>
+                <div className={styles.inputWrap}>
+                  <input
+                    id="onboard-fullname"
+                    className={styles.input}
+                    name="fullName"
+                    autoComplete="off"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    disabled={loading}
+                    required
+                    placeholder="e.g. Ada Test"
+                  />
+                </div>
+              </div>
+
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="onboard-email">
+                  Admin email
+                </label>
+                <div className={styles.inputWrap}>
+                  <input
+                    id="onboard-email"
+                    className={styles.input}
+                    name="email"
+                    type="email"
+                    autoComplete="off"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    disabled={loading}
+                    required
+                    placeholder="you@company.com"
+                  />
+                </div>
+              </div>
+
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="onboard-username">
+                  Username
+                </label>
+                <div className={styles.inputWrap}>
+                  <input
+                    id="onboard-username"
+                    className={styles.input}
+                    name="username"
+                    autoComplete="off"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    disabled={loading}
+                    required
+                    placeholder="e.g. adatst"
+                  />
+                </div>
+              </div>
+
+              <div className={`${styles.field} ${styles.fullWidth}`}>
+                <label className={styles.label} htmlFor="onboard-pin">
+                  PIN (6 digits)
+                </label>
+                <div className={styles.inputWrap}>
+                  <input
+                    id="onboard-pin"
+                    className={styles.input}
+                    name="pin"
+                    type="password"
+                    inputMode="numeric"
+                    autoComplete="new-password"
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    disabled={loading}
+                    required
+                    maxLength={6}
+                    placeholder="6-digit PIN"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className={styles.row} style={{ marginTop: 16 }}>
+              <span style={{ fontSize: 12, color: '#67748c' }}>
+                You can change the PIN later from your profile.
+              </span>
+              <button
+                type="button"
+                className={styles.link}
+                onClick={() => router.push('/login')}
+              >
+                Already have an account?
+              </button>
+            </div>
+
+            <button type="submit" className={styles.submit} disabled={loading}>
+              {loading ? (
+                <>
+                  <span className={styles.spinner} aria-hidden />
+                  Creating account…
+                </>
+              ) : (
+                'Create company'
+              )}
+            </button>
+          </form>
+
+          <div className={styles.notice}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+              strokeLinejoin="round">
+              <rect x="6" y="10" width="12" height="9" rx="2" />
+              <path d="M8 10V7a4 4 0 1 1 8 0v3" />
+            </svg>
+            <span>Protected access. Create your company account with verified admin details.</span>
+          </div>
+        </div>
+      </main>
+    </div>
+  )
 }
