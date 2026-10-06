@@ -1,13 +1,13 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
 import { savedMenuAccess } from '@/lib/rbac'
 import { ONBOARDING_COMPLETED_KEY } from '@/components/entry-page'
 import styles from '@/components/auth/login.module.css'
 
-export default function OnboardPage() {
+function OnboardForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { login } = useAccounting()
@@ -22,15 +22,6 @@ export default function OnboardPage() {
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true)
-
-  useEffect(() => {
-    if (window.localStorage.getItem(ONBOARDING_COMPLETED_KEY) === 'true') {
-      router.replace('/login')
-      return
-    }
-    setIsCheckingOnboarding(false)
-  }, [router])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -129,10 +120,6 @@ export default function OnboardPage() {
     } finally {
       setLoading(false)
     }
-  }
-
-  if (isCheckingOnboarding) {
-    return <div style={{ minHeight: '100vh', background: '#0b1220' }} aria-hidden="true" />
   }
 
   return (
@@ -311,13 +298,9 @@ export default function OnboardPage() {
               <span className={styles.hint}>
                 You can change the PIN later from your profile.
               </span>
-              <button
-                type="button"
-                className={styles.link}
-                onClick={() => router.push('/login')}
-              >
+              <a href="/login" className={styles.link}>
                 Already have an account?
-              </button>
+              </a>
             </div>
 
             <button type="submit" className={styles.submit} disabled={loading}>
@@ -344,5 +327,13 @@ export default function OnboardPage() {
         </div>
       </main>
     </div>
+  )
+}
+
+export default function OnboardPage() {
+  return (
+    <Suspense fallback={<div style={{ minHeight: '100vh', background: '#0b1220' }} aria-hidden="true" />}>
+      <OnboardForm />
+    </Suspense>
   )
 }

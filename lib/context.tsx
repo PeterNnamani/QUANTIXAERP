@@ -4,7 +4,6 @@ import {loadAllInventory, productsToInventory, saveInventoryRows} from '@/lib/in
 
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 import { supabase } from './supabase.browser'
-import WorkspaceLoader from '@/components/layout/workspace-loader'
 import { explicitAccessLevels, getDefaultRoles, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
 import { getTrialEndDate, isTrialActive, TRIAL_PLAN, type PlanName } from '@/lib/licensing'
 
@@ -766,7 +765,6 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [subscriptionLoaded, setSubscriptionLoaded] = useState(false)
   const [state, setState] = useState<AppState>(defaultState)
-  const [isLoading, setIsLoading] = useState(true)
   const companySettingsWriteQueue = useRef(Promise.resolve())
   const trialExpiryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const remoteLoadToken = useRef(0)
@@ -1059,8 +1057,6 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       console.error('Unable to restore the saved session', error)
-    } finally {
-      setIsLoading(false)
     }
   }, [user?.companyId])
 
@@ -1733,10 +1729,6 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     logout,
     addAuditLog,
     activateSubscription,
-  }
-
-  if (isLoading) {
-    return <WorkspaceLoader phase="session" />
   }
 
   return (

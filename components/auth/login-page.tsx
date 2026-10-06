@@ -222,13 +222,17 @@ export default function LoginPage() {
                 />
                 Remember me
               </label>
-              <button
-                type="button"
+              <a
+                href="/onboard"
                 className={styles.link}
-                onClick={() => router.push('/onboard')}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  window.location.assign('/onboard')
+                }}
               >
                 Create company
-              </button>
+              </a>
             </div>
 
             <button

@@ -303,6 +303,7 @@
   font-weight: 600;
   cursor: pointer;
   border-radius: 6px;
+  text-decoration: none;
 }
 
 .link:hover {
