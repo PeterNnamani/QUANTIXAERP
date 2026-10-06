@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { displayOpenBalance, moveBankBalance, settledOpenItem } from '@/lib/open-item-payment'
+import { financialPositionOpenings, isOpeningBalanceRow, OPENING_ROW_IDS } from '@/lib/opening-balances'
 import { formatCurrency, formatNumber, triggerAppToast, makeID } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
 import PaymentModal from '@/components/modals/PaymentModal'
@@ -24,9 +25,10 @@ export default function ReceivablesPage() {
     return customers.length > 0 ? customers : []
   }, [state.receivables])
 
+  const openings = financialPositionOpenings(state.chartOfAccounts)
   const receivables = useMemo(() => {
     const source = state.receivables
-    return source.map((item, idx) => ({
+    const rows = source.map((item, idx) => ({
       id: item.id || `AR-${idx + 1}`,
       customer: item.name || item.customer,
       invoice: item.invoice || `INV-${1000 + idx}`,
@@ -40,7 +42,22 @@ export default function ReceivablesPage() {
       rep: item.rep || 'Peter',
       branch: item.branch || 'Lagos',
     }))
-  }, [state.receivables])
+    if (openings.receivables <= 0) return rows
+    return [{
+      id: OPENING_ROW_IDS.receivables,
+      customer: 'Opening balance',
+      invoice: 'BF',
+      invoiceDate: openings.receivablesDate || '—',
+      dueDate: openings.receivablesDate || '—',
+      total: openings.receivables,
+      paid: 0,
+      balance: openings.receivables,
+      status: 'Opening',
+      daysOverdue: 0,
+      rep: '—',
+      branch: '—',
+    }, ...rows]
+  }, [openings.receivables, openings.receivablesDate, state.receivables])
 
   const filteredReceivables = useMemo(() => {
     const query = searchTerm.toLowerCase()
@@ -79,6 +96,10 @@ export default function ReceivablesPage() {
   const [showPayment, setShowPayment] = useState(false)
 
   const handlePostPayment = (payment: { amount: number; transactionId: string; accountId: string; accountName: string; paymentMethod: string; date: string; note: string }) => {
+    if (isOpeningBalanceRow(payment.transactionId)) {
+      triggerAppToast('Opening balance', 'Change the receivables opening in Settings > Opening Balances.')
+      return
+    }
     const paymentItem = receivables.find((item) => item.id === payment.transactionId) || selectedItem
     const paymentAmount = Math.min(payment.amount, paymentItem?.balance || 0)
     const bankName = payment.accountName || 'Cash / Other'
@@ -116,18 +137,20 @@ export default function ReceivablesPage() {
     triggerAppToast('Payment Posted', `Posted ${formatCurrency(paymentAmount)} for ${paymentItem?.invoice}`)
   }
 
+  const operationalReceivables = filteredReceivables.filter((item) => !isOpeningBalanceRow(item.id))
+  const paymentItem = operationalReceivables.find((item) => item.id === selectedItem?.id) || operationalReceivables[0]
   const totalOutstanding = filteredReceivables.reduce((sum, item) => sum + item.balance, 0)
-  const dueToday = filteredReceivables.filter((item) => item.daysOverdue === 0 && item.balance > 0).reduce((sum, item) => sum + item.balance, 0)
-  const overdue = filteredReceivables.filter((item) => item.status === 'Overdue').reduce((sum, item) => sum + item.balance, 0)
-  const collectedThisMonth = filteredReceivables.reduce((sum, item) => sum + Math.max(0, item.total - item.balance), 0)
+  const dueToday = operationalReceivables.filter((item) => item.daysOverdue === 0 && item.balance > 0).reduce((sum, item) => sum + item.balance, 0)
+  const overdue = operationalReceivables.filter((item) => item.status === 'Overdue').reduce((sum, item) => sum + item.balance, 0)
+  const collectedThisMonth = operationalReceivables.reduce((sum, item) => sum + Math.max(0, item.total - item.balance), 0)
 
   const summaryCards = [
     { label: 'Total Outstanding', value: formatCurrency(totalOutstanding), tone: 'warning' },
     { label: 'Due Today', value: formatCurrency(dueToday), tone: 'info' },
     { label: 'Overdue', value: formatCurrency(overdue), tone: 'critical' },
     { label: 'Collected This Month', value: formatCurrency(collectedThisMonth), tone: 'success' },
-    { label: 'Outstanding Invoices', value: formatNumber(filteredReceivables.filter((item) => item.balance > 0).length), tone: 'info' },
-    { label: 'Customers with Balances', value: formatNumber(new Set(filteredReceivables.filter((item) => item.balance > 0).map((item) => item.customer)).size), tone: 'info' },
+    { label: 'Outstanding Invoices', value: formatNumber(operationalReceivables.filter((item) => item.balance > 0).length), tone: 'info' },
+    { label: 'Customers with Balances', value: formatNumber(new Set(operationalReceivables.filter((item) => item.balance > 0).map((item) => item.customer)).size), tone: 'info' },
   ]
 
   return (
@@ -257,7 +280,7 @@ export default function ReceivablesPage() {
                       <td>{formatCurrency(item.paid)}</td>
                       <td>{formatCurrency(item.balance)}</td>
                       <td>{item.daysOverdue}</td>
-                      <td><span className={`receivables-pill ${item.status === 'Paid' ? 'success' : item.status === 'Partially Paid' ? 'warning' : 'danger'}`}>{item.status}</span></td>
+                      <td><span className={`receivables-pill ${item.status === 'Paid' ? 'success' : item.status === 'Partially Paid' ? 'warning' : item.status === 'Opening' ? 'info' : 'danger'}`}>{item.status}</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -313,7 +336,7 @@ export default function ReceivablesPage() {
         </div>
       </div>
 
-      <PaymentModal open={showPayment} onClose={() => setShowPayment(false)} onConfirm={handlePostPayment} records={filteredReceivables} selectedRecordId={selectedItem?.id} selectedItem={selectedItem} recordLabel="Receivable transaction being paid" accountLabel="Paid to account" bankAccounts={state.bankAccounts} defaultAmount={selectedItem?.balance || 0} title="Record Receivable Payment" />
+      <PaymentModal open={showPayment} onClose={() => setShowPayment(false)} onConfirm={handlePostPayment} records={operationalReceivables} selectedRecordId={paymentItem?.id} selectedItem={paymentItem} recordLabel="Receivable transaction being paid" accountLabel="Paid to account" bankAccounts={state.bankAccounts} defaultAmount={paymentItem?.balance || 0} title="Record Receivable Payment" />
     </AppLayout>
   )
 }

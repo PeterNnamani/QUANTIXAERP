@@ -11,6 +11,16 @@ test('inventory file preserves decimals, zero values and product name ahead of d
  const [fraction] = prepareInventoryRows([{'Product Name':'Oil','Opening Stock':12.75,'Purchased':1.5,'Sold':0.25}])
  assert.equal(fraction.closing,14);assert.equal(inventoryToRow(fraction,'company').opening_qty,12.75)
 })
+test('blank Excel rows are skipped so the rest of the list is imported', () => {
+ const result = prepareInventoryRows([
+  {},
+  {'Product Name':'Rice', SKU:'R', 'Stock Qty': 2.5, 'Unit Cost': 10.25},
+  {__sheet:'Food', category:'Food', sheetCategory:'Food'},
+ ])
+ assert.equal(result.length, 1)
+ assert.equal(result[0].closing, 2.5)
+ assert.equal(result[0].unitCost, 10.25)
+})
 test('all 1201 input rows remain in the inventory import', () => {
  const rows = Array.from({length:1201},(_,i)=>({'Product Name':`Item ${i}`,SKU:`S-${i}`,'Stock Qty':i+0.5}))
  const result=prepareInventoryRows(rows);assert.equal(result.length,1201);assert.equal(result.at(-1).closing,1200.5)
@@ -41,6 +51,14 @@ test('pagination failure does not return a partial inventory as success',async()
 test('bulk save uses one statement and surfaces database rejection',async()=>{
  let calls=0;const client={from:()=>({async upsert(rows,options){calls++;assert.equal(rows.length,2);assert.equal(options.onConflict,'company_id,sku');return {error:{message:'permission denied'}}}})}
  await assert.rejects(saveInventoryRows(client,'company',[existing,{...existing,sku:'B'}]),/permission denied/);assert.equal(calls,1)
+})
+test('bulk save retries after dropping columns missing from the live schema',async()=>{
+ const written=[];const client={from:()=>({async upsert(rows,options){written.push({columns:Object.keys(rows[0]),onConflict:options.onConflict});if(rows[0].opening_qty!==undefined)return {error:{message:"Could not find the 'opening_qty' column of 'products' in the schema cache."}};if(rows[0].purchased_qty!==undefined)return {error:{message:"Could not find the 'purchased_qty' column of 'products' in the schema cache."}};return {error:null}}})}
+ await saveInventoryRows(client,'company',[existing])
+ assert.equal(written.at(-1).columns.includes('opening_qty'),false)
+ assert.equal(written.at(-1).columns.includes('purchased_qty'),false)
+ assert.equal(written.at(-1).columns.includes('sku'),true)
+ assert.equal(written.at(-1).onConflict,'company_id,sku')
 })
 function accountsClient(error=null) {
  const result={written:null};const query={select(){return this},async eq(){return {data:[],error:null}},async upsert(rows){result.written=rows;return {error}}}

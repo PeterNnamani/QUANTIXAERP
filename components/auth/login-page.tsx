@@ -140,7 +140,7 @@ export default function LoginPage() {
             </div>
           </header>
 
-          <form onSubmit={handleLogin} noValidate>
+          <form onSubmit={handleLogin} autoComplete="on" noValidate>
             {error && (
               <div className={styles.error} role="alert">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -168,8 +168,12 @@ export default function LoginPage() {
                 <input
                   id="login-username"
                   className={styles.input}
+                  name="username"
                   type="text"
                   autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   placeholder="e.g. adatst or STF-33573726-DUH1"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
@@ -193,8 +197,12 @@ export default function LoginPage() {
                 <input
                   id="login-pin"
                   className={styles.input}
+                  name="password"
                   type="password"
                   autoComplete="current-password"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   inputMode="numeric"
                   maxLength={6}
                   placeholder="Enter your 6-digit PIN"

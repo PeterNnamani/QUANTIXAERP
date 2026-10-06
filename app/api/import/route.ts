@@ -156,7 +156,10 @@ async function findOrCreateProduct(product: any, companyId: string): Promise<str
     }
 
     if (existing && existing.length > 0) {
-        const { data: updated, error: updateErr } = await writeWithSchemaFallback(insertData, (values) => supabaseAdmin!
+        const updateData: Record<string, unknown> = { ...insertData }
+        delete updateData.stock_qty
+        delete updateData.created_at
+        const { data: updated, error: updateErr } = await writeWithSchemaFallback(updateData, (values) => supabaseAdmin!
             .from('products')
             .update(values)
             .eq('id', existing[0].id)

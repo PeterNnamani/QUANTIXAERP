@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { displayOpenBalance, moveBankBalance, settledOpenItem } from '@/lib/open-item-payment'
+import { financialPositionOpenings, isOpeningBalanceRow, OPENING_ROW_IDS } from '@/lib/opening-balances'
 import { formatCurrency, formatNumber, triggerAppToast, makeID } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
 import PaymentModal from '@/components/modals/PaymentModal'
@@ -24,8 +25,9 @@ export default function PayablesPage() {
     return suppliers.length > 0 ? suppliers : []
   }, [state.payables])
 
+  const openings = financialPositionOpenings(state.chartOfAccounts)
   const payables = useMemo(() => {
-    return state.payables.map((item, idx) => ({
+    const rows = state.payables.map((item, idx) => ({
       id: item.id || `BILL-${idx + 1}`,
       supplier: item.supplier || item.name,
       invoiceNumber: item.invoice_number || item.invoiceNumber || item.invoice || `INV-${1000 + idx}`,
@@ -39,7 +41,22 @@ export default function PayablesPage() {
       daysOverdue: item.daysOverdue || 0,
       branch: item.branch || 'Lagos',
     }))
-  }, [state.payables])
+    if (openings.payables <= 0) return rows
+    return [{
+      id: OPENING_ROW_IDS.payables,
+      supplier: 'Opening balance',
+      invoiceNumber: 'BF',
+      purchaseRef: 'BF',
+      invoiceDate: openings.payablesDate || '—',
+      dueDate: openings.payablesDate || '—',
+      total: openings.payables,
+      paid: 0,
+      balance: openings.payables,
+      status: 'Opening',
+      daysOverdue: 0,
+      branch: '—',
+    }, ...rows]
+  }, [openings.payables, openings.payablesDate, state.payables])
 
   const filteredPayables = useMemo(() => {
     const query = searchTerm.toLowerCase()
@@ -76,12 +93,23 @@ export default function PayablesPage() {
   const [showPayment, setShowPayment] = useState(false)
 
   const handlePostPayment = (payment: { amount: number; transactionId: string; accountId: string; accountName: string; paymentMethod: string; date: string; note: string }) => {
+    if (isOpeningBalanceRow(payment.transactionId)) {
+      triggerAppToast('Opening balance', 'Change the payables opening in Settings > Opening Balances.')
+      return
+    }
     const paymentItem = payables.find((item) => item.id === payment.transactionId) || selectedItem
     const paymentAmount = Math.min(payment.amount, paymentItem?.balance || 0)
     const bankName = payment.accountName || 'Cash / Other'
     const updatedPayables = state.payables.map((record) => record.id === paymentItem?.id ? settledOpenItem(record, paymentAmount) : record)
     const updatedPurchases = state.purchases.map((purchase) => {
-      if (purchase.id !== paymentItem?.id && purchase.id !== paymentItem?.purchaseRef) return purchase
+      if (
+        purchase.id !== paymentItem?.id
+        && purchase.id !== paymentItem?.purchaseRef
+        && purchase.reference !== paymentItem?.purchaseRef
+        && purchase.reference !== paymentItem?.id
+        && purchase.invoiceNumber !== paymentItem?.invoiceNumber
+        && purchase.invoiceNumber !== paymentItem?.purchaseRef
+      ) return purchase
       const amountPaid = Number(purchase.amountPaid || 0) + paymentAmount
       const balance = Math.max(0, Number(purchase.total || 0) - amountPaid)
       return { ...purchase, amountPaid, balance, paymentStatus: balance === 0 ? 'PAID' : 'PARTIAL' }
@@ -112,18 +140,20 @@ export default function PayablesPage() {
     triggerAppToast('Payment Posted', `Posted ${formatCurrency(paymentAmount)} for ${paymentItem?.id}`)
   }
 
+  const operationalPayables = filteredPayables.filter((item) => !isOpeningBalanceRow(item.id))
+  const paymentItem = operationalPayables.find((item) => item.id === selectedItem?.id) || operationalPayables[0]
   const totalOutstanding = filteredPayables.reduce((sum, item) => sum + item.balance, 0)
-  const dueToday = filteredPayables.filter((item) => item.daysOverdue === 0 && item.balance > 0).reduce((sum, item) => sum + item.balance, 0)
-  const overdue = filteredPayables.filter((item) => item.status === 'Overdue').reduce((sum, item) => sum + item.balance, 0)
-  const paidThisMonth = filteredPayables.reduce((sum, item) => sum + Math.max(0, item.total - item.balance), 0)
+  const dueToday = operationalPayables.filter((item) => item.daysOverdue === 0 && item.balance > 0).reduce((sum, item) => sum + item.balance, 0)
+  const overdue = operationalPayables.filter((item) => item.status === 'Overdue').reduce((sum, item) => sum + item.balance, 0)
+  const paidThisMonth = operationalPayables.reduce((sum, item) => sum + Math.max(0, item.total - item.balance), 0)
 
   const summaryCards = [
     { label: 'Total Outstanding', value: formatCurrency(totalOutstanding), tone: 'warning' },
     { label: 'Due Today', value: formatCurrency(dueToday), tone: 'info' },
     { label: 'Overdue Bills', value: formatCurrency(overdue), tone: 'critical' },
     { label: 'Paid This Month', value: formatCurrency(paidThisMonth), tone: 'success' },
-    { label: 'Outstanding Bills', value: formatNumber(filteredPayables.filter((item) => item.balance > 0).length), tone: 'info' },
-    { label: 'Active Suppliers', value: formatNumber(new Set(filteredPayables.filter((item) => item.balance > 0).map((item) => item.supplier)).size), tone: 'info' },
+    { label: 'Outstanding Bills', value: formatNumber(operationalPayables.filter((item) => item.balance > 0).length), tone: 'info' },
+    { label: 'Active Suppliers', value: formatNumber(new Set(operationalPayables.filter((item) => item.balance > 0).map((item) => item.supplier)).size), tone: 'info' },
   ]
 
   return (
@@ -255,7 +285,7 @@ export default function PayablesPage() {
                       <td>{formatCurrency(item.paid)}</td>
                       <td>{formatCurrency(item.balance)}</td>
                       <td>{item.daysOverdue}</td>
-                      <td><span className={`payables-pill ${item.status === 'Paid' ? 'success' : item.status === 'Partially Paid' ? 'warning' : 'danger'}`}>{item.status}</span></td>
+                      <td><span className={`payables-pill ${item.status === 'Paid' ? 'success' : item.status === 'Partially Paid' ? 'warning' : item.status === 'Opening' ? 'info' : 'danger'}`}>{item.status}</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -311,7 +341,7 @@ export default function PayablesPage() {
         </div>
       </div>
 
-      <PaymentModal open={showPayment} onClose={() => setShowPayment(false)} onConfirm={handlePostPayment} records={filteredPayables} selectedRecordId={selectedItem?.id} selectedItem={selectedItem} recordLabel="Payable transaction being paid" bankAccounts={state.bankAccounts} defaultAmount={selectedItem?.balance || 0} title="Record Payable Payment" />
+      <PaymentModal open={showPayment} onClose={() => setShowPayment(false)} onConfirm={handlePostPayment} records={operationalPayables} selectedRecordId={paymentItem?.id} selectedItem={paymentItem} recordLabel="Payable transaction being paid" bankAccounts={state.bankAccounts} defaultAmount={paymentItem?.balance || 0} title="Record Payable Payment" />
     </AppLayout>
   )
 }

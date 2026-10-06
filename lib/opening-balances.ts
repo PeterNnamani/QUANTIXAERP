@@ -1,4 +1,74 @@
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const n = (value: unknown) => Number(value || 0)
+const nameKey = (value: unknown) => String(value || '').trim().toLowerCase()
+
+export const OPENING_ACCOUNT_NAMES = {
+    ppe: ['Property, Plant & Equipment', 'PPE', 'Fixed Asset', 'Fixed Assets'],
+    cashAndBank: ['Cash and Bank Balance'],
+    cash: ['Cash'],
+    inventory: ['Inventory'],
+    prepayments: ['Prepayments'],
+    receivables: ['Receivables', 'Trade Receivables', 'Accounts Receivable'],
+    capital: ['Capital'],
+    retainedEarnings: ['Retained Earnings'],
+    drawings: ['Drawings'],
+    loan: ['Loan'],
+    payables: ['Payables', 'Accounts Payable'],
+    accruals: ['Accruals'],
+}
+
+export const OPENING_ROW_IDS = {
+    receivables: 'OPENING-AR',
+    payables: 'OPENING-AP',
+    ppe: 'OPENING-PPE',
+    prepayments: 'OPENING-PP',
+    loan: 'OPENING-LOAN',
+}
+
+export function isOpeningBalanceRow(id?: string | null) {
+    return String(id || '').startsWith('OPENING-')
+}
+
+export function openingBalanceFor(accounts: Array<{ name?: string; openingBalance?: number }> | undefined, names: string[]) {
+    const wanted = new Set(names.map(nameKey))
+    return (accounts || []).reduce((sum, account) => wanted.has(nameKey(account.name)) ? sum + n(account.openingBalance) : sum, 0)
+}
+
+export function openingBalanceDateFor(accounts: Array<{ name?: string; openingBalanceDate?: string | null }> | undefined, names: string[]) {
+    const wanted = new Set(names.map(nameKey))
+    const match = (accounts || []).find((account) => wanted.has(nameKey(account.name)) && account.openingBalanceDate)
+    return match?.openingBalanceDate || ''
+}
+
+export function financialPositionOpenings(accounts: Array<{ name?: string; openingBalance?: number; openingBalanceDate?: string | null }> | undefined) {
+    const value = (key: keyof typeof OPENING_ACCOUNT_NAMES) => openingBalanceFor(accounts, OPENING_ACCOUNT_NAMES[key])
+    const date = (key: keyof typeof OPENING_ACCOUNT_NAMES) => openingBalanceDateFor(accounts, OPENING_ACCOUNT_NAMES[key])
+    return {
+        ppe: value('ppe'),
+        ppeDate: date('ppe'),
+        cashAndBank: value('cashAndBank'),
+        cash: value('cash'),
+        inventory: value('inventory'),
+        inventoryDate: date('inventory'),
+        prepayments: value('prepayments'),
+        prepaymentsDate: date('prepayments'),
+        receivables: value('receivables'),
+        receivablesDate: date('receivables'),
+        capital: value('capital'),
+        retainedEarnings: value('retainedEarnings'),
+        drawings: value('drawings'),
+        loan: value('loan'),
+        loanDate: date('loan'),
+        payables: value('payables'),
+        payablesDate: date('payables'),
+        accruals: value('accruals'),
+    }
+}
+
+export function dashboardCashOpening(openings: { cash: number; cashAndBank: number }, hasBankAccounts: boolean) {
+    return n(openings.cash) + (hasBankAccounts ? 0 : n(openings.cashAndBank))
+}
+
 export async function saveOpeningBalances(client: any, companyId: string, accounts: any[]) {
     if (!client || !companyId) throw new Error('Sign in to a connected company before saving.')
     const {data: existing, error: lookupError} = await client.from('chart_of_accounts').select('id,name,code').eq('company_id', companyId)

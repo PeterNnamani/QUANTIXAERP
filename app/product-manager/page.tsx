@@ -151,12 +151,12 @@ export default function ProductManagerPage() {
                         <div className="pg-subtitle">Manage products, pricing, categories, variants, suppliers, and product settings.</div>
                     </div>
                     <div className="product-manager-actions">
-                        <InventoryImport />
+                        <InventoryImport buttonClassName="product-manager-btn secondary" />
                         <button className="product-manager-btn secondary" type="button" onClick={() => setShowProductForm(true)}>+ Add Product</button>
                         
                         <button className="product-manager-btn secondary allow-readonly" type="button" onClick={handleExportProducts}>Export Products</button>
                         <button className="product-manager-btn secondary" type="button" onClick={() => setShowFilters((prev) => !prev)}>{showFilters ? 'Hide Filters' : 'Show Filters'}</button>
-                        <InventoryImport label="Bulk update by SKU" />
+                        <InventoryImport label="Bulk update by SKU" buttonClassName="product-manager-btn secondary" />
                     </div>
                 </div>
 
@@ -334,9 +334,9 @@ export default function ProductManagerPage() {
                                             <td>{product.brand}</td>
                                             <td>{formatCurrency(product.costPrice)}</td>
                                             <td>{formatCurrency(product.sellingPrice)}</td>
-                                            <td>{product.stock}</td>
+                                            <td>{formatNumber(product.stock)}</td>
                                             <td>{product.expiryDate || '—'}</td>
-                                            <td>{product.damagedExpired}</td>
+                                            <td>{formatNumber(product.damagedExpired)}</td>
                                             <td><span className={`product-manager-pill ${product.stockStatus === 'Out of Stock' ? 'danger' : product.stockStatus === 'Low Stock' ? 'warning' : 'success'}`}>{product.stockStatus}</span></td>
                                         </tr>
                                     ))}

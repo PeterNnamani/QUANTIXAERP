@@ -2,20 +2,41 @@
 
 import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
-import BulkImport from '@/components/bulk-import'
+import InventoryImport from '@/components/inventory/inventory-import'
+import Modal from '@/components/ui/modal'
 import { useAccounting } from '@/lib/context'
+import { getSupabaseClient } from '@/lib/supabase.browser'
+import { saveInventoryRows } from '@/lib/inventory-workflows'
 import { formatCurrency, formatNumber, triggerAppToast } from '@/lib/utils'
+import { financialPositionOpenings } from '@/lib/opening-balances'
 import { downloadExcel } from '@/lib/export-utils'
-import InventorySheetTable, { inventorySheetHeaders, type InventorySheet } from '@/components/inventory/inventory-sheet-table'
+import InventorySheetTable, { type InventorySheet } from '@/components/inventory/inventory-sheet-table'
+
+type StockAction = 'increase' | 'decrease' | 'receive' | 'count' | 'relocate'
+
+const actionTitles: Record<StockAction, string> = {
+  increase: 'Increase stock',
+  decrease: 'Decrease stock',
+  receive: 'Receive stock',
+  count: 'Stock count',
+  relocate: 'Move location',
+}
 
 export default function InventoryPage() {
-  const { state, updateState, deleteInventoryItems, addAuditLog } = useAccounting()
+  const { state, user, updateState, deleteInventoryItems, addAuditLog } = useAccounting()
   const [search, setSearch] = useState('')
-  const [selectedWarehouse, setSelectedWarehouse] = useState('Main Warehouse')
+  const [selectedWarehouse, setSelectedWarehouse] = useState('All Warehouses')
   const [selectedCategory, setSelectedCategory] = useState('All Categories')
   const [selectedStatus, setSelectedStatus] = useState('All Status')
   const [selectedSheet, setSelectedSheet] = useState<InventorySheet>('product-master')
   const [showFilters, setShowFilters] = useState(false)
+  const [action, setAction] = useState<StockAction | ''>('')
+  const [actionSku, setActionSku] = useState('')
+  const [quantity, setQuantity] = useState('')
+  const [reason, setReason] = useState('')
+  const [destination, setDestination] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState('')
 
   const inventoryRows = useMemo(() => {
     return state.inventory.map((item, index) => ({
@@ -30,10 +51,10 @@ export default function InventoryPage() {
       stockValue: item.closing * item.unitCost,
       expiryDate: item.expiryDate || '',
       damagedExpired: item.damagedExpired || 0,
-      reorderLevel: Math.max(5, Math.floor((item.closing || 0) * 0.2)),
-      reorderQuantity: Math.max(0, Math.floor(Math.max(5, Math.floor((item.closing || 0) * 0.2)) - (item.closing || 0))),
-      status: item.closing <= 0 ? 'Out of Stock' : item.closing <= 10 ? 'Low Stock' : 'In Stock',
-      warehouse: 'Main Warehouse',
+      reorderLevel: item.reorderLevel ?? 5,
+      reorderQuantity: item.reorderQuantity ?? Math.max(0, (item.reorderLevel ?? 5) - item.closing),
+      status: item.expiryDate && item.expiryDate < new Date().toISOString().slice(0, 10) ? 'Expired' : item.closing <= 0 ? 'Out of Stock' : item.closing <= (item.reorderLevel ?? 5) ? 'Low Stock' : 'In Stock',
+      warehouse: item.branch || 'Main Warehouse',
     }))
   }, [state.inventory])
 
@@ -48,58 +69,89 @@ export default function InventoryPage() {
     })
   }, [inventoryRows, search, selectedCategory, selectedStatus, selectedWarehouse])
 
-  const handleInventoryAction = (action: string) => {
-    triggerAppToast(action, 'Inventory action queued and logged for the warehouse team.')
-    if (action === 'Export Excel') {
+  const openStockAction = (nextAction: StockAction) => {
+    setAction(nextAction)
+    setActionSku(state.inventory.find((item) => item.sku === filteredRows[0]?.sku)?.sku || state.inventory[0]?.sku || state.inventory[0]?.product || '')
+    setQuantity('')
+    setReason('')
+    setDestination('')
+    setActionError('')
+  }
+
+  const submitStockAction = async () => {
+    setActionError('')
+    if (!action) return
+    const selected = state.inventory.find((item) => item.sku === actionSku || item.product === actionSku)
+    if (!selected) {
+      setActionError('Select a product.')
+      return
+    }
+    if (!reason.trim()) {
+      setActionError('Enter a reason or reference.')
+      return
+    }
+    const amount = Number(quantity)
+    if (action !== 'relocate' && (quantity.trim() === '' || !Number.isFinite(amount) || amount < 0 || (amount === 0 && action !== 'count'))) {
+      setActionError('Enter a valid quantity.')
+      return
+    }
+    if (action === 'relocate' && !destination.trim()) {
+      setActionError('Enter a destination location.')
+      return
+    }
+    if (action === 'decrease' && amount > Number(selected.closing || 0)) {
+      setActionError(`Only ${selected.closing} unit(s) are available.`)
+      return
+    }
+
+    const nextItem = {
+      ...selected,
+      closing: action === 'count' ? amount
+        : action === 'decrease' ? Number(selected.closing || 0) - amount
+        : action === 'relocate' ? Number(selected.closing || 0)
+        : Number(selected.closing || 0) + amount,
+      purchased: action === 'receive' ? Number(selected.purchased || 0) + amount : Number(selected.purchased || 0),
+      branch: action === 'relocate' ? destination.trim() : selected.branch,
+      lastCountQty: action === 'count' ? amount : selected.lastCountQty,
+      lastCountVariance: action === 'count' ? amount - Number(selected.closing || 0) : selected.lastCountVariance,
+      lastCountAt: action === 'count' ? new Date().toISOString() : selected.lastCountAt,
+      lastCountReason: action === 'count' ? reason.trim() : selected.lastCountReason,
+    }
+
+    setBusy(true)
+    try {
+      await saveInventoryRows(getSupabaseClient(), user?.companyId || '', [nextItem])
+      updateState({
+        inventory: state.inventory.map((item) => (selected.sku ? item.sku === selected.sku : item.product === selected.product) ? nextItem : item),
+      }, { persist: false })
+      addAuditLog(action.toUpperCase(), 'INVENTORY', selected.sku || selected.product, reason.trim())
+      triggerAppToast('Inventory saved', `${selected.product} was updated.`)
+      setAction('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Unable to save this stock change.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleInventoryAction = (label: string) => {
+    if (label === 'Export Excel') {
       downloadExcel('inventory-export.xlsx', filteredRows)
       addAuditLog('EXPORT', 'INVENTORY', 'ALL', 'Inventory exported to Excel.')
       return
     }
-
-    if (action === '+ Stock Adjustment') {
-      const updatedInventory = state.inventory.map((item) => ({ ...item, closing: Math.max(0, item.closing - 1) }))
-      updateState({ inventory: updatedInventory })
-      addAuditLog('UPDATE', 'INVENTORY', 'INV-ADJ', 'Stock adjustment recorded for the selected warehouse.')
-      return
-    }
-
-    if (action === '+ Stock Transfer') {
-      const updatedInventory = state.inventory.map((item, index) =>
-        index === 0
-          ? { ...item, closing: Math.max(0, item.closing - 2), sold: item.sold + 2 }
-          : item
-      )
-      updateState({ inventory: updatedInventory })
-      addAuditLog('TRANSFER', 'INVENTORY', updatedInventory[0]?.product || 'INV-TRANSFER', 'Stock transfer processed for the selected item.')
-      return
-    }
-
-    if (action === '+ Receive Stock') {
-      const updatedInventory = state.inventory.map((item, index) =>
-        index === 0
-          ? { ...item, closing: item.closing + 5, purchased: item.purchased + 5 }
-          : item
-      )
-      updateState({ inventory: updatedInventory })
-      addAuditLog('RECEIVE', 'INVENTORY', updatedInventory[0]?.product || 'INV-RECEIVE', 'Stock received and inventory levels updated.')
-      return
-    }
-
-    if (action === '+ Stock Count') {
-      const updatedInventory = state.inventory.map((item) => ({
-        ...item,
-        closing: Math.max(0, item.openQty + item.purchased - item.sold),
-      }))
-      updateState({ inventory: updatedInventory })
-      addAuditLog('COUNT', 'INVENTORY', 'STOCK-COUNT', 'Stock count reconciled for warehouse inventory.')
-      return
-    }
+    if (label === '+ Stock Adjustment') return openStockAction('decrease')
+    if (label === '+ Stock Transfer') return openStockAction('relocate')
+    if (label === '+ Receive Stock') return openStockAction('receive')
+    if (label === '+ Stock Count') return openStockAction('count')
   }
 
+  const openings = financialPositionOpenings(state.chartOfAccounts)
+  const stockValue = inventoryRows.reduce((sum, row) => sum + row.stockValue, 0)
   const summaryCards = [
     { label: 'Total Products', value: formatNumber(inventoryRows.length), tone: 'info' },
     { label: 'Items in Stock', value: formatNumber(inventoryRows.reduce((sum, row) => sum + row.available, 0)), tone: 'info' },
-    { label: 'Inventory Value', value: formatCurrency(inventoryRows.reduce((sum, row) => sum + row.stockValue, 0)), tone: 'info' },
+    { label: 'Inventory Value', value: formatCurrency(stockValue + openings.inventory), tone: 'info' },
     { label: 'Low Stock Items', value: formatNumber(inventoryRows.filter((row) => row.status === 'Low Stock').length), tone: 'warning' },
     { label: 'Out of Stock', value: formatNumber(inventoryRows.filter((row) => row.status === 'Out of Stock').length), tone: 'critical' },
     { label: 'Expiring Soon', value: formatNumber(inventoryRows.filter((row) => row.status === 'Expired').length), tone: 'warning' },
@@ -114,7 +166,7 @@ export default function InventoryPage() {
             <div className="pg-subtitle">Monitor stock levels, warehouse activities, inventory movements, and stock valuation.</div>
           </div>
           <div className="inventory-actions">
-            <BulkImport label="Bulk upload" tableColumns={inventorySheetHeaders[selectedSheet]} />
+            <InventoryImport label="Bulk upload" buttonClassName="inventory-btn secondary" />
             <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Stock Adjustment')}>+ Stock Adjustment</button>
             <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Stock Transfer')}>+ Stock Transfer</button>
             <button className="inventory-btn secondary" onClick={() => handleInventoryAction('+ Receive Stock')}>+ Receive Stock</button>
@@ -132,6 +184,51 @@ export default function InventoryPage() {
             </div>
           ))}
         </div>
+        {openings.inventory > 0 && <p className="metric-note">Inventory value includes opening inventory of {formatCurrency(openings.inventory)} from Settings.</p>}
+
+        <Modal open={Boolean(action)} title={action ? actionTitles[action] : 'Update inventory'} onClose={() => { if (!busy) setAction('') }}>
+          <div className="fg">
+            <label>Product</label>
+            <select value={actionSku} disabled={busy} onChange={(event) => setActionSku(event.target.value)}>
+              <option value="">Select product</option>
+              {state.inventory.map((item) => (
+                <option key={item.sku || item.product} value={item.sku || item.product}>
+                  {item.product}{item.sku ? ` (${item.sku})` : ''} — {item.closing} available
+                </option>
+              ))}
+            </select>
+          </div>
+          {(action === 'increase' || action === 'decrease') && (
+            <div className="fg">
+              <label>Adjustment</label>
+              <select value={action} disabled={busy} onChange={(event) => setAction(event.target.value as StockAction)}>
+                <option value="increase">Increase stock</option>
+                <option value="decrease">Decrease stock</option>
+              </select>
+            </div>
+          )}
+          {action === 'relocate' ? (
+            <div className="fg">
+              <label>Destination</label>
+              <input value={destination} disabled={busy} onChange={(event) => setDestination(event.target.value)} placeholder="Warehouse or branch" />
+            </div>
+          ) : (
+            <div className="fg">
+              <label>{action === 'count' ? 'Actual physical count' : 'Quantity'}</label>
+              <input type="number" min="0" step="any" value={quantity} disabled={busy} onChange={(event) => setQuantity(event.target.value)} />
+            </div>
+          )}
+          <div className="fg">
+            <label>Reason / reference</label>
+            <input value={reason} disabled={busy} onChange={(event) => setReason(event.target.value)} />
+          </div>
+          <p className="metric-note">This updates one product only. Record the related purchase or sale separately when money is involved.</p>
+          {actionError && <p role="alert" className="staff-inline-notice error">{actionError}</p>}
+          <div className="inventory-import-actions">
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submitStockAction()}>{busy ? 'Saving…' : 'Save change'}</button>
+            <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setAction('')}>Cancel</button>
+          </div>
+        </Modal>
 
         {showFilters && (
           <div className="inventory-card">

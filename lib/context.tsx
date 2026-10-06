@@ -1,6 +1,6 @@
 'use client'
 
-import {loadAllInventory, inventoryToRow} from '@/lib/inventory-workflows'
+import {loadAllInventory, productsToInventory, saveInventoryRows} from '@/lib/inventory-workflows'
 
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 import { supabase } from './supabase.browser'
@@ -192,6 +192,7 @@ export interface Purchase {
   }>
   amountPaid?: number
   balance?: number
+  reference?: string
   employee?: string
   deletedAt?: string
   purgeAfter?: string
@@ -421,6 +422,7 @@ export interface AccountingContextType {
   updateState: (updates: Partial<AppState>, options?: { persist?: boolean }) => void
   resetCompanyBooks: () => void
   deleteInventoryItems: (skus: string[]) => Promise<void>
+  reloadInventory: () => Promise<InventoryItem[]>
   login: (userData: User, remember: boolean) => void
   logout: () => void
   addAuditLog: (action: string, type: string, reference: string, details: string) => void
@@ -634,41 +636,7 @@ function normalizeRemotePayables(data: any[]) {
 }
 
 function normalizeRemoteInventory(data: any[]): AppState['inventory'] {
-  return (data || []).map((item: any) => ({
-    product: item.name || item.sku || item.id,
-    sku: item.sku || '',
-    barcode: item.barcode || '',
-    description: item.description || '',
-    branch: item.branch || '',
-    dept: item.category || item.branch || 'General',
-    subCategory: item.sub_category || '',
-    brand: item.brand || '',
-    uom: item.uom || 'Unit',
-    packSize: item.pack_size || '',
-    baseUnit: item.base_unit || '',
-    conversionFactor: Number(item.conversion_factor || 1),
-    openQty: Number(item.opening_qty ?? item.stock_qty ?? 0),
-    purchased: Number(item.purchased_qty || 0),
-    sold: Number(item.sold_qty || 0),
-    lastCountQty: item.last_count_qty, lastCountVariance: item.last_count_variance, lastCountAt: item.last_count_at, lastCountReason: item.last_count_reason,
-    reserved: Number(item.reserved_qty || 0),
-    unitCost: Number(item.unit_cost || 0),
-    averageCost: Number(item.average_cost || item.unit_cost || 0),
-    sellingPrice: Number(item.unit_price || 0),
-    closing: Number(item.stock_qty || 0),
-    reorderLevel: Number(item.reorder_level || 0),
-    reorderQuantity: Number(item.reorder_quantity || 0),
-    maximumStockLevel: Number(item.maximum_stock_level || 0),
-    supplier: item.supplier || '',
-    batchNumber: item.batch_number || '',
-    expiryDate: item.expiry_date || '',
-    manufacturingDate: item.manufacturing_date || '',
-    lastPurchaseDate: item.last_purchase_date || '',
-    lastSaleDate: item.last_sale_date || '',
-    active: item.status !== 'inactive',
-    remarks: item.remarks || '',
-    damagedExpired: Number(item.damaged_expired || 0),
-  }))
+  return productsToInventory(data)
 }
 
 function normalizeInventorySkus(inventory: InventoryItem[]): InventoryItem[] {
@@ -1303,9 +1271,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.inventory) {
-            const inventoryRows = (normalizedUpdates.inventory as InventoryItem[]).map(item => inventoryToRow(item, companyId))
-            const { error: inventoryPersistErr } = await supabase.from('products').upsert(inventoryRows, { onConflict: 'company_id,sku' })
-            if (inventoryPersistErr) throw inventoryPersistErr
+            await saveInventoryRows(supabase, companyId, normalizedUpdates.inventory as InventoryItem[])
           }
 
           if (normalizedUpdates.expenses) {
@@ -1615,6 +1581,15 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     updateState({ inventory: state.inventory.filter((item) => !deleted.has(item.sku || '')) }, {persist: false})
   }
 
+  const reloadInventory = async () => {
+    if (!supabase || !user?.companyId) throw new Error('Sign in to a connected company before loading inventory.')
+    const {data, error} = await loadAllInventory(supabase, user.companyId)
+    if (error) throw new Error(error.message || 'Inventory could not be reloaded from the database.')
+    const inventory = normalizeRemoteInventory(data || [])
+    updateState({ inventory }, {persist: false})
+    return inventory
+  }
+
   const login = (userData: User, remember: boolean) => {
     const enriched = enrichStoredUser(userData)
     setUser(enriched)
@@ -1753,6 +1728,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     updateState,
     resetCompanyBooks,
     deleteInventoryItems,
+    reloadInventory,
     login,
     logout,
     addAuditLog,

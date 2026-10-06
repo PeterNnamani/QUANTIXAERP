@@ -1,3 +1,5 @@
+import { financialPositionOpenings } from './opening-balances.ts'
+
 export type ReportPeriod = { label: string; startDate: string; endDate: string }
 
 type Account = {
@@ -184,26 +186,51 @@ export function buildManagementAccounts(input: ManagementAccountsInput, periods:
         { label: 'Drawings', values: [0], total: 0 },
     ]
 
+    const openings = financialPositionOpenings(input.chartOfAccounts)
     const bankRows = input.bankAccounts && input.bankAccounts.length > 0
         ? input.bankAccounts.map((bank) => ({ label: bank.name, value: n(bank.balance) }))
         : Object.entries(input.banks || {}).map(([label, value]) => ({ label, value: n(value) }))
-    const cashRows = bankRows
-    const inventoryRows = (input.inventory || []).map((item) => ({ label: item.product, value: n(item.unitCost) * n(item.closing) }))
-    const prepaymentRows = (input.prepayments || []).map((item) => ({ label: item.reference || item.type || 'Prepayment', value: n(item.remainingAmount) }))
-    const receivableRows = (input.receivables || []).map((item) => ({ label: item.name || item.customer || 'Debtor', value: n(item.balance ?? item.outstanding_amount ?? item.amount) }))
-    const payableRows = (input.payables || []).map((item) => ({ label: item.name || item.supplier || 'Creditor', value: n(item.balance ?? item.outstanding_amount ?? item.amount) }))
-    const loanRows = (input.loans || []).map((item) => ({ label: item.lender || item.name || 'Lender', value: n(item.balance ?? item.amount) }))
+    const cashRows = [
+        ...(openings.cash > 0 ? [{ label: 'Cash', value: openings.cash }] : []),
+        ...(!bankRows.length && openings.cashAndBank > 0 ? [{ label: 'Opening balance', value: openings.cashAndBank }] : []),
+        ...bankRows,
+    ]
+    const inventoryRows = [
+        ...(openings.inventory > 0 ? [{ label: 'Opening balance', value: openings.inventory }] : []),
+        ...(input.inventory || []).map((item) => ({ label: item.product, value: n(item.unitCost) * n(item.closing) })),
+    ]
+    const prepaymentRows = [
+        ...(openings.prepayments > 0 ? [{ label: 'Opening balance', value: openings.prepayments }] : []),
+        ...(input.prepayments || []).map((item) => ({ label: item.reference || item.type || 'Prepayment', value: n(item.remainingAmount) })),
+    ]
+    const receivableRows = [
+        ...(openings.receivables > 0 ? [{ label: 'Opening balance', value: openings.receivables }] : []),
+        ...(input.receivables || []).map((item) => ({ label: item.name || item.customer || 'Debtor', value: n(item.balance ?? item.outstanding_amount ?? item.amount) })),
+    ]
+    const payableRows = [
+        ...(openings.payables > 0 ? [{ label: 'Opening balance', value: openings.payables }] : []),
+        ...(input.payables || []).map((item) => ({ label: item.name || item.supplier || 'Creditor', value: n(item.balance ?? item.outstanding_amount ?? item.amount) })),
+    ]
+    const loanRows = [
+        ...(openings.loan > 0 ? [{ label: 'Opening balance', value: openings.loan }] : []),
+        ...(input.loans || []).map((item) => ({ label: item.lender || item.name || 'Lender', value: n(item.balance ?? item.amount) })),
+    ]
+    const accruals = accountValue(input.chartOfAccounts, input.journalLines, input.journalEntries, ['accrual'], endDate)
+    const accrualRows = accruals !== 0 ? [{ label: 'Opening balance', value: accruals }] : []
     const noteRows = (rows: Array<{ label: string; value: number }>, note: number): AmountRow[] => [...rows.map((row) => ({ label: row.label, values: [row.value], total: row.value })), { label: 'Subtotal', values: [sum(rows.map((row) => row.value))], total: sum(rows.map((row) => row.value)), note }]
-    const notes = { 2: noteRows(cashRows, 2), 3: noteRows(inventoryRows, 3), 4: noteRows(prepaymentRows, 4), 5: noteRows(receivableRows, 5), 6: noteRows(loanRows, 6), 7: noteRows(payableRows, 7), 8: noteRows([], 8) }
+    const notes = { 2: noteRows(cashRows, 2), 3: noteRows(inventoryRows, 3), 4: noteRows(prepaymentRows, 4), 5: noteRows(receivableRows, 5), 6: noteRows(loanRows, 6), 7: noteRows(payableRows, 7), 8: noteRows(accrualRows, 8) }
 
     const fixedAssetPurchases = (input.purchases || [])
         .filter((purchase) => isActive(purchase.status) && ['Assets', 'Furniture', 'Electronics'].includes(purchase.category || ''))
         .map((purchase) => ({ category: purchase.category, cost: n(purchase.total), purchaseDate: purchase.date, depreciation: 0, accumulatedDepreciation: 0 }))
-    const fixedAssets: Array<{ category?: string; assetClass?: string; cost?: number; depreciation?: number; accumulatedDepreciation?: number; purchaseDate?: string }> = input.fixedAssets && input.fixedAssets.length > 0
-        ? input.fixedAssets
-        : fixedAssetPurchases.length > 0
-            ? fixedAssetPurchases
-            : accounts.filter((account) => matches(account, ['property, plant', 'fixed asset', 'ppe'])).map((account) => ({ category: account.name, cost: Math.abs(lineBalance(account, lines, entries, endDate)), depreciation: 0, accumulatedDepreciation: 0 }))
+    const openingAsset = openings.ppe > 0
+        ? [{ category: 'Property, Plant & Equipment', cost: openings.ppe, purchaseDate: openings.ppeDate || '1900-01-01', depreciation: 0, accumulatedDepreciation: 0 }]
+        : []
+    const operationalAssets = input.fixedAssets && input.fixedAssets.length > 0 ? input.fixedAssets : fixedAssetPurchases
+    const combinedAssets = [...openingAsset, ...operationalAssets]
+    const fixedAssets: Array<{ category?: string; assetClass?: string; cost?: number; depreciation?: number; accumulatedDepreciation?: number; purchaseDate?: string }> = combinedAssets.length > 0
+        ? combinedAssets
+        : accounts.filter((account) => matches(account, ['property, plant', 'fixed asset', 'ppe'])).map((account) => ({ category: account.name, cost: Math.abs(lineBalance(account, lines, entries, endDate)), depreciation: 0, accumulatedDepreciation: 0 }))
     const ppeClasses = [...new Set(fixedAssets.map((asset) => asset.category || asset.assetClass || 'Other'))]
     const periodStart = orderedPeriods[0].startDate
     const assetRowsByClass = (assetClass: string) => fixedAssets.filter((asset) => (asset.category || asset.assetClass || 'Other') === assetClass)
@@ -258,12 +285,13 @@ export function buildManagementAccounts(input: ManagementAccountsInput, periods:
     const receivables = notes[5][notes[5].length - 1].total
     const loan = notes[6][notes[6].length - 1].total
     const payables = notes[7][notes[7].length - 1].total
-    const accruals = 0
     const totalCurrentAssets = cash + inventory + prepayments + receivables
     const totalAssets = ppeRows[8].total + totalCurrentAssets
     const capital = accountValue(input.chartOfAccounts, input.journalLines, input.journalEntries, ['capital'], endDate)
-    const drawings = pnlRows[pnlRows.length - 1].total
-    const totalEquity = capital + pnlRows[pnlRows.length - 2].total + drawings
+    const drawingsBalance = accountValue(input.chartOfAccounts, input.journalLines, input.journalEntries, ['drawings'], endDate)
+    const drawings = drawingsBalance === 0 ? 0 : -Math.abs(drawingsBalance)
+    const retainedEarnings = accountValue(input.chartOfAccounts, input.journalLines, input.journalEntries, ['retained earnings'], endDate) + pnlRows[pnlRows.length - 2].total
+    const totalEquity = capital + retainedEarnings + drawings
     const totalEquityLiabilities = totalEquity + loan + payables + accruals
     const sfpRows: AmountRow[] = [
         { label: 'Property, Plant & Equipment', note: 1, values: [ppeRows[8].total], total: ppeRows[8].total },
@@ -275,7 +303,7 @@ export function buildManagementAccounts(input: ManagementAccountsInput, periods:
         { label: 'TOTAL ASSETS', values: [totalAssets], total: totalAssets },
         { label: 'EQUITY:', values: [], total: 0, kind: 'section' },
         { label: 'Capital', values: [capital], total: capital },
-        { label: 'Retained Earnings', values: [pnlRows[pnlRows.length - 2].total], total: pnlRows[pnlRows.length - 2].total },
+        { label: 'Retained Earnings', values: [retainedEarnings], total: retainedEarnings },
         { label: 'Drawings', values: [drawings], total: drawings },
         { label: 'CURRENT LIABILITIES:', values: [], total: 0, kind: 'section' },
         { label: 'Loan', note: 6, values: [loan], total: loan },

@@ -62,6 +62,7 @@
 
   --background: #ffffff;
   --foreground: #0f1c3a;
+  color-scheme: light;
 }
 
 /* Public onboarding landing page */
@@ -1486,6 +1487,33 @@
   font-weight: 700;
 }
 
+.inventory-import-copy {
+  display: grid;
+  gap: 8px;
+  color: var(--text2);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.inventory-import-copy p {
+  margin: 0;
+}
+
+.inventory-import-preview {
+  max-height: 280px;
+  overflow: auto;
+  margin: 12px 0 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+}
+
+.inventory-import-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
 .pin-form {
   margin-top: 18px;
 }
@@ -1775,6 +1803,7 @@
 
   --background: #0f172a;
   --foreground: #f8fafc;
+  color-scheme: dark;
 }
 
 * {
@@ -3053,6 +3082,11 @@ html[data-theme='dark'] .topbar {
   color: var(--red-text);
 }
 
+.receivables-pill.info {
+  background: var(--blue-bg);
+  color: var(--royal);
+}
+
 .receivables-detail-panel {
   display: flex;
   flex-direction: column;
@@ -4246,6 +4280,11 @@ html[data-theme='dark'] .topbar {
 .payables-pill.danger {
   background: var(--red-bg);
   color: var(--red-text);
+}
+
+.payables-pill.info {
+  background: var(--blue-bg);
+  color: var(--royal);
 }
 
 .payables-detail-panel {
@@ -6691,6 +6730,9 @@ html[data-theme='dark'] .sidebar-body {
 
 .inventory-btn,
 .product-manager-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: none;
   border-radius: 999px;
   padding: 10px 16px;

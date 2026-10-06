@@ -71,7 +71,7 @@ export default function OnboardPage() {
       window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, 'true')
 
       // 2. Auto-login via the auth-based route (v2)
-      const loginResp = await fetch('/api/auth/login-v2', {
+      const loginResp = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -181,7 +181,7 @@ export default function OnboardPage() {
             </div>
           </header>
 
-          <form onSubmit={handleSubmit} autoComplete="off" noValidate>
+          <form onSubmit={handleSubmit} autoComplete="on" noValidate>
             {error && (
               <div className={styles.error} role="alert">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -204,8 +204,9 @@ export default function OnboardPage() {
                   <input
                     id="onboard-company"
                     className={styles.input}
-                    name="companyName"
-                    autoComplete="off"
+                    name="organization"
+                    autoComplete="organization"
+                    autoCorrect="on"
                     value={companyName}
                     onChange={(e) => setCompanyName(e.target.value)}
                     disabled={loading}
@@ -223,8 +224,9 @@ export default function OnboardPage() {
                   <input
                     id="onboard-fullname"
                     className={styles.input}
-                    name="fullName"
-                    autoComplete="off"
+                    name="name"
+                    autoComplete="name"
+                    autoCorrect="on"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
                     disabled={loading}
@@ -244,7 +246,10 @@ export default function OnboardPage() {
                     className={styles.input}
                     name="email"
                     type="email"
-                    autoComplete="off"
+                    autoComplete="email"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     disabled={loading}
@@ -263,7 +268,10 @@ export default function OnboardPage() {
                     id="onboard-username"
                     className={styles.input}
                     name="username"
-                    autoComplete="off"
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     disabled={loading}
@@ -281,10 +289,13 @@ export default function OnboardPage() {
                   <input
                     id="onboard-pin"
                     className={styles.input}
-                    name="pin"
+                    name="new-password"
                     type="password"
                     inputMode="numeric"
                     autoComplete="new-password"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={pin}
                     onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
                     disabled={loading}
@@ -297,7 +308,7 @@ export default function OnboardPage() {
             </div>
 
             <div className={styles.row} style={{ marginTop: 16 }}>
-              <span style={{ fontSize: 12, color: '#67748c' }}>
+              <span className={styles.hint}>
                 You can change the PIN later from your profile.
               </span>
               <button

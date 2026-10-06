@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { formatCurrency, formatNumber, triggerAppToast } from '@/lib/utils'
+import { financialPositionOpenings, isOpeningBalanceRow, OPENING_ROW_IDS } from '@/lib/opening-balances'
 import { downloadExcel } from '@/lib/export-utils'
 import PaymentModal from '@/components/modals/PaymentModal'
 import AddLoanModal from '@/components/modals/AddLoanModal'
@@ -38,18 +39,39 @@ export default function LoansPage() {
     const [showFilters, setShowFilters] = useState(false)
     const [loanAction, setLoanAction] = useState<'settlement' | 'reports' | null>(null)
 
-    const loans = state.loans || []
+    const openings = financialPositionOpenings(state.chartOfAccounts)
+    const recordedLoans = state.loans || []
+    const loans = useMemo(() => {
+        if (openings.loan <= 0) return recordedLoans
+        return [{
+            id: OPENING_ROW_IDS.loan,
+            lender: 'Opening balance',
+            type: 'Brought forward',
+            originalAmount: openings.loan,
+            amount: openings.loan,
+            balance: openings.loan,
+            status: 'Opening',
+            startDate: openings.loanDate || '',
+            endDate: '',
+            periodMonths: 0,
+            interestRate: 0,
+            principalPaid: 0,
+            interestRemaining: 0,
+            paymentSchedule: [],
+            nextPayment: '—',
+        }, ...recordedLoans]
+    }, [openings.loan, openings.loanDate, recordedLoans])
+    const operationalLoans = loans.filter((loan) => !isOpeningBalanceRow(loan.id))
     const totalBorrowed = loans.reduce((sum, loan) => sum + Number(loan.originalAmount ?? loan.amount ?? 0), 0)
     const totalOutstanding = loans.reduce((sum, loan) => sum + Number(loan.balance ?? loan.amount ?? 0), 0)
-    const totalInterest = loans.reduce((sum, loan) => sum + Number(loan.interestRemaining ?? 0), 0)
-    const upcomingPayments = loans.reduce((sum, loan) => sum + (loan.paymentSchedule || []).filter((item: any) => item.date >= new Date().toISOString().slice(0, 10)).reduce((scheduleTotal: number, item: any) => scheduleTotal + Number(item.payment || 0), 0), 0)
+    const upcomingPayments = operationalLoans.reduce((sum, loan) => sum + (loan.paymentSchedule || []).filter((item: any) => item.date >= new Date().toISOString().slice(0, 10)).reduce((scheduleTotal: number, item: any) => scheduleTotal + Number(item.payment || 0), 0), 0)
     const loanSummaryCards = [
-        { label: 'Total Outstanding Debt', value: formatCurrency(totalOutstanding), subtitle: loans.length ? 'Current loan balances' : 'No loan records yet', tone: 'info' },
-        { label: 'Total Borrowed', value: formatCurrency(totalBorrowed), subtitle: loans.length ? 'Original principal' : 'No loan records yet', tone: 'purple' },
+        { label: 'Total Outstanding Debt', value: formatCurrency(totalOutstanding), subtitle: loans.length ? 'Current loan balances including opening' : 'No loan records yet', tone: 'info' },
+        { label: 'Total Borrowed', value: formatCurrency(totalBorrowed), subtitle: loans.length ? 'Original principal including opening' : 'No loan records yet', tone: 'purple' },
         { label: 'Paid This Year', value: formatCurrency(Math.max(0, totalBorrowed - totalOutstanding)), subtitle: 'Principal repaid', tone: 'success' },
         { label: 'Upcoming Payments', value: formatCurrency(upcomingPayments), subtitle: 'Scheduled repayments', tone: 'warning' },
         { label: 'Interest Paid', value: formatCurrency(0), subtitle: 'Recorded interest', tone: 'amber' },
-        { label: 'Debt Health Score', value: loans.length ? '82' : '0', subtitle: loans.length ? 'Based on current debt' : 'No loan records yet', tone: 'green' },
+        { label: 'Debt Health Score', value: operationalLoans.length ? '82' : loans.length ? '82' : '0', subtitle: loans.length ? 'Based on current debt' : 'No loan records yet', tone: 'green' },
     ]
 
     const filteredLoans = useMemo(() => {
@@ -103,9 +125,13 @@ export default function LoansPage() {
     const [showAddLoan, setShowAddLoan] = useState(false)
 
     const handlePostRepayment = (payment: { amount: number; loanId: string; accountId: string; accountName: string; paymentMethod: string; date: string; note: string }) => {
-        const loan = loans.find((item) => item.id === payment.loanId)
+        if (isOpeningBalanceRow(payment.loanId)) {
+            triggerAppToast('Opening balance', 'Change the loan opening in Settings > Opening Balances.')
+            return
+        }
+        const loan = recordedLoans.find((item) => item.id === payment.loanId)
         const repayment = Math.min(payment.amount, Number(loan?.balance ?? 0))
-        const updatedLoans = loans.map((loan) => {
+        const updatedLoans = recordedLoans.map((loan) => {
             if (loan.id !== payment.loanId) return loan
             const balance = Math.max(0, Number(loan.balance ?? 0) - repayment)
             return {
@@ -240,10 +266,10 @@ export default function LoansPage() {
                     open={showPayment}
                     onClose={() => setShowPayment(false)}
                     onConfirm={handlePostRepayment}
-                    loans={loans}
+                    loans={operationalLoans}
                     bankAccounts={state.bankAccounts}
-                    selectedLoanId={selectedLoan?.id}
-                    defaultAmount={Number(selectedLoan?.balance ?? 0)}
+                    selectedLoanId={operationalLoans.find((loan) => loan.id === selectedLoan?.id)?.id || operationalLoans[0]?.id}
+                    defaultAmount={Number((operationalLoans.find((loan) => loan.id === selectedLoan?.id) || operationalLoans[0])?.balance ?? 0)}
                 />
                 <AddLoanModal open={showAddLoan} onClose={() => setShowAddLoan(false)} onCreate={handleCreateLoan} />
                 <LoanActionModal

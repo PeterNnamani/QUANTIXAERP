@@ -495,12 +495,18 @@ export async function parseSpreadsheetFile(file: File): Promise<ImportRecord[]> 
     workbook.SheetNames.forEach((sheetName) => {
         const worksheet = workbook.Sheets[sheetName]
         if (!worksheet) return
-        const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
+        const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '', raw: true, blankrows: false })
         if (sheetRows.length > 0) {
             const normalizedSheetName = sheetName.trim()
             const rowsWithCategory = sheetRows.map((row, index) => ({
                 __sheet: sheetName, __row: (row as any).__rowNum__ !== undefined ? Number((row as any).__rowNum__) + 1 : index + 2,
                 ...Object.fromEntries(Object.entries(normalizeRowKeys(row)).map(([key, value]) => {
+                    if (['expiry date', 'expiry', 'manufacturing date'].includes(key) && value instanceof Date && !Number.isNaN(value.getTime())) {
+                        const year = value.getFullYear()
+                        const month = value.getMonth() + 1
+                        const day = value.getDate()
+                        return [key, `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`]
+                    }
                     if (['expiry date', 'expiry', 'manufacturing date'].includes(key) && typeof value === 'number') {
                         const date = XLSX.SSF.parse_date_code(value)
                         if (date) return [key, `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`]
@@ -512,7 +518,15 @@ export async function parseSpreadsheetFile(file: File): Promise<ImportRecord[]> 
                     const normalizedRow = normalizeRowKeys(row)
                     return normalizedRow['category'] || normalizedRow['dept'] || normalizedRow['department'] || normalizedSheetName
                 })(),
-            }))
+            })).filter((row) => {
+                const sheet = String(row.__sheet || row.sheetCategory || '').trim().toLowerCase()
+                return Object.entries(row).some(([key, value]) => {
+                    if (key === '__sheet' || key === '__row' || key === 'sheetCategory') return false
+                    const text = String(value ?? '').trim()
+                    if (!text) return false
+                    return !(key === 'category' && text.toLowerCase() === sheet)
+                })
+            })
             rows.push(...rowsWithCategory)
         }
     })

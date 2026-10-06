@@ -30,6 +30,19 @@ test('Excel date cells become ISO expiry dates',async()=>{
  assert.equal(prepareInventoryRows(await parseSpreadsheetFile(file))[0].expiryDate,'2027-01-31')
 })
 
+test('empty worksheet rows do not block decimal inventory import',async()=>{
+ const workbook=XLSX.utils.book_new()
+ XLSX.utils.book_append_sheet(workbook,XLSX.utils.json_to_sheet([
+  {'Product Name':'Oil',SKU:'O-1','Stock Qty':12.75,'Unit Cost':99.5,'Selling Price':120.25},
+  {'Product Name':'','SKU':'','Stock Qty':'','Unit Cost':''},
+ ]),'Food')
+ const file=new File([XLSX.write(workbook,{type:'buffer',bookType:'xlsx'})],'empty-rows.xlsx')
+ const result=prepareInventoryRows(await parseSpreadsheetFile(file))
+ assert.equal(result.length,1)
+ assert.equal(result[0].closing,12.75)
+ assert.equal(result[0].unitCost,99.5)
+ assert.equal(result[0].sellingPrice,120.25)
+})
 test('CSV preserves leading-zero SKUs and literal dates',async()=>{
  const file=new File(['SKU,Product Name,Expiry Date,Stock Qty\n001,Rice,2027-01-31,1.5\n'],'dates.csv')
  const [item]=prepareInventoryRows(await parseSpreadsheetFile(file))

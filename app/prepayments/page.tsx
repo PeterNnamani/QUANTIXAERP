@@ -4,6 +4,7 @@ import AppLayout from '@/components/layout/app-layout'
 import { useMemo, useState } from 'react'
 import { useAccounting, type Prepayment } from '@/lib/context'
 import { formatCurrency, formatNumber, triggerAppToast } from '@/lib/utils'
+import { financialPositionOpenings, isOpeningBalanceRow, OPENING_ROW_IDS } from '@/lib/opening-balances'
 import { downloadExcel } from '@/lib/export-utils'
 import PrepaymentModal, { type PrepaymentModalMode } from '@/components/modals/PrepaymentModal'
 
@@ -37,7 +38,34 @@ export default function PrepaymentsPage() {
   const [showFilters, setShowFilters] = useState(false)
   const [modalMode, setModalMode] = useState<PrepaymentModalMode | null>(null)
 
-  const prepayments = state.prepayments.length > 0 ? state.prepayments : fallbackPrepayments
+  const openings = financialPositionOpenings(state.chartOfAccounts)
+  const prepayments = useMemo(() => {
+    const rows = state.prepayments.length > 0 ? state.prepayments : fallbackPrepayments
+    if (openings.prepayments <= 0) return rows
+    return [{
+      id: OPENING_ROW_IDS.prepayments,
+      reference: 'BF-PREPAY',
+      type: 'Opening balance',
+      supplier: 'Brought forward',
+      originalAmount: openings.prepayments,
+      usedAmount: 0,
+      remainingAmount: openings.prepayments,
+      startDate: openings.prepaymentsDate || '',
+      endDate: openings.prepaymentsDate || '',
+      paymentMethod: 'Opening',
+      bankAccount: '',
+      referenceNo: 'BF',
+      recordedBy: 'Settings',
+      recognitionStatus: 'Not Started',
+      recognitionProgress: 0,
+      status: 'Opening',
+      notes: 'Brought forward from Settings > Opening Balances.',
+      datePaid: openings.prepaymentsDate || '',
+      category: 'Other',
+      paymentSource: 'Opening',
+      schedule: [],
+    }, ...rows]
+  }, [openings.prepayments, openings.prepaymentsDate, state.prepayments])
 
   const filteredPrepayments = useMemo(() => {
     const query = searchTerm.toLowerCase()
@@ -109,6 +137,11 @@ export default function PrepaymentsPage() {
   }
 
   const handleSavePrepayment = (prepayment: Prepayment) => {
+    if (isOpeningBalanceRow(prepayment.id) || prepayment.reference === 'BF-PREPAY') {
+      triggerAppToast('Opening balance', 'Change the prepayments opening in Settings > Opening Balances.')
+      setModalMode(null)
+      return
+    }
     const exists = state.prepayments.some((item) => item.id === prepayment.id)
     const nextPrepayments = exists
       ? state.prepayments.map((item) => item.id === prepayment.id ? prepayment : item)
@@ -376,7 +409,7 @@ export default function PrepaymentsPage() {
         <PrepaymentModal
           open={modalMode !== null}
           mode={modalMode || 'create'}
-          selected={selectedPrepayment}
+          selected={isOpeningBalanceRow(selectedPrepayment?.id) ? null : selectedPrepayment}
           suppliers={supplierOptions}
           onClose={() => setModalMode(null)}
           onSave={handleSavePrepayment}

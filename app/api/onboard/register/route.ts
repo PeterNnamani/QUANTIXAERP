@@ -1,12 +1,7 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { getSupabaseAdminClient, writeWithSchemaFallback } from '@/lib/supabase.server'
+import { getSupabaseConfigStatus } from '@/lib/env.server'
 import { hashPin, isValidPin } from '@/lib/pin'
-
-const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SECRET_KEY!,
-  { auth: { persistSession: false, autoRefreshToken: false } }
-)
 
 type SignupBody = {
   companyName?: string
@@ -24,12 +19,18 @@ function generateStaffId(): string {
 }
 
 export async function POST(req: Request) {
-  // --- Guard: environment ---
-  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) {
-    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 })
+  const supabaseAdmin = getSupabaseAdminClient()
+  if (!supabaseAdmin) {
+    const config = getSupabaseConfigStatus()
+    return NextResponse.json(
+      {
+        error: 'Server misconfigured',
+        detail: `Supabase env is incomplete (url=${config.hasUrl}, secret=${config.hasSecretKey}).`,
+      },
+      { status: 500 },
+    )
   }
 
-  // --- Parse ---
   let body: SignupBody
   try {
     body = await req.json()
@@ -45,7 +46,6 @@ export async function POST(req: Request) {
   const role = (body.role || 'business-owner').trim()
   const roleTitle = (body.roleTitle || 'Business Owner').trim()
 
-  // --- Validate ---
   if (!companyName || !fullName || !email || !pin || !username) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
@@ -58,42 +58,40 @@ export async function POST(req: Request) {
   if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
     return NextResponse.json(
       { error: 'Username must be 3-32 chars: letters, digits, dot, underscore, dash' },
-      { status: 400 }
+      { status: 400 },
     )
   }
 
-  // --- 1. Create auth user ---
-  const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
-    email,
-    password: pin,
-    email_confirm: true,
-  })
-
-  if (authErr || !authData?.user) {
-    const msg = authErr?.message || 'Failed to create auth user'
-    const status = /already|exists|registered/i.test(msg) ? 409 : 500
-    return NextResponse.json({ error: msg }, { status })
+  let authUserId: string | null = null
+  try {
+    const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password: pin,
+      email_confirm: true,
+    })
+    if (authData?.user?.id) {
+      authUserId = authData.user.id
+    } else if (authErr) {
+      console.warn('[register] optional auth user skipped:', authErr.message)
+    }
+  } catch (error) {
+    console.warn('[register] optional auth user skipped:', error)
   }
 
-  const authUserId = authData.user.id
-
-  // --- 2. Hash the PIN before we write anything else. If this fails, we
-  //        delete the auth user and return, so no orphan rows are left. ---
-  let pinHash: string
+  let pinHash: string | null = null
   try {
     pinHash = await hashPin(pin)
   } catch (err) {
-    await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
+    if (authUserId) await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
     return NextResponse.json(
       {
         error: 'Failed to secure PIN',
         detail: err instanceof Error ? err.message : 'unknown',
       },
-      { status: 500 }
+      { status: 500 },
     )
   }
 
-  // --- 3. Create company ---
   const { data: company, error: companyErr } = await supabaseAdmin
     .from('companies')
     .insert({ name: companyName })
@@ -101,48 +99,57 @@ export async function POST(req: Request) {
     .single()
 
   if (companyErr || !company) {
-    await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
+    if (authUserId) await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
     return NextResponse.json(
       { error: 'Failed to create company', detail: companyErr?.message },
-      { status: 500 }
+      { status: 500 },
     )
   }
 
-  // --- 4. Create public.users row ---
   const staffId = generateStaffId()
-  const { data: user, error: userErr } = await supabaseAdmin
-    .from('users')
-    .insert({
+  const insertData: Record<string, unknown> = {
+    company_id: company.id,
+    email,
+    full_name: fullName,
+    role,
+    role_title: roleTitle,
+    staff_id: staffId,
+    username,
+    pin,
+    pin_hash: pinHash,
+    status: 'active',
+  }
+  if (authUserId) insertData.auth_user_id = authUserId
+
+  const { data: inserted, error: userErr } = await writeWithSchemaFallback(insertData, async (values) =>
+    supabaseAdmin.from('users').insert(values).select('id').single(),
+  )
+
+  if (userErr || !inserted) {
+    await supabaseAdmin.from('companies').delete().eq('id', company.id)
+    if (authUserId) await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
+    return NextResponse.json(
+      { error: 'Failed to create user profile', detail: userErr?.message },
+      { status: 500 },
+    )
+  }
+
+  return NextResponse.json({
+    user: {
+      id: inserted.id,
       company_id: company.id,
-      auth_user_id: authUserId,
       email,
       full_name: fullName,
       role,
       role_title: roleTitle,
       staff_id: staffId,
       username,
-      pin: null,          // no plaintext going forward
-      pin_hash: pinHash,  // bcrypt hash
       status: 'active',
-    })
-    .select(
-      'id, company_id, email, full_name, role, role_title, staff_id, username, status, access_levels, branch, department, position'
-    )
-    .single()
-
-  if (userErr || !user) {
-    // Compensating cleanup: drop the company and the auth user.
-    await supabaseAdmin.from('companies').delete().eq('id', company.id)
-    await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {})
-    return NextResponse.json(
-      { error: 'Failed to create user profile', detail: userErr?.message },
-      { status: 500 }
-    )
-  }
-
-  // --- Success ---
-  return NextResponse.json({
-    user,
+      access_levels: null,
+      branch: null,
+      department: null,
+      position: null,
+    },
     company: { id: company.id, name: company.name },
   })
 }

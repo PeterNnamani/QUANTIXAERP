@@ -9,6 +9,8 @@ import { buildReceivableFromSale, mergeReceivablesFromSales } from '@/lib/receiv
 import { formatCurrency, makeID, getCurrentDate, PAYMENT_TERMS, canEdit, parseNumeric, triggerAppToast } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-utils'
 import { parseExcelFile, parseImportDate } from '@/lib/import-utils'
+import { moveBankBalance } from '@/lib/open-item-payment'
+import { restoreSoldItemsToInventory } from '@/lib/inventory-workflows'
 
 const branchOptions = ['All Branches', 'Head Office', 'Retail Outlet', 'Warehouse 01', 'Warehouse 02']
 const paymentMethods = ['All Payment Methods', 'Cash', 'Transfer', 'Cheque', 'Mobile Money', 'POS', 'Credit']
@@ -193,20 +195,21 @@ export default function SalesPage() {
 
     const inventoryUpdates = [...state.inventory]
     for (const item of formData.items) {
+      const qty = Number(item.qty) || 0
       const inventoryIndex = inventoryUpdates.findIndex((inventoryItem) => inventoryItem.product.toLowerCase() === item.product.toLowerCase())
       if (inventoryIndex < 0) {
         alert(`Product ${item.product} is not available in inventory.`)
         return
       }
       const inventoryItem = inventoryUpdates[inventoryIndex]
-      if (item.qty > inventoryItem.closing) {
+      if (qty > Number(inventoryItem.closing)) {
         alert(`Only ${inventoryItem.closing} unit(s) of ${inventoryItem.product} are available.`)
         return
       }
       inventoryUpdates[inventoryIndex] = {
         ...inventoryItem,
-        sold: inventoryItem.sold + item.qty,
-        closing: inventoryItem.closing - item.qty,
+        sold: Number(inventoryItem.sold || 0) + qty,
+        closing: Number(inventoryItem.closing || 0) - qty,
         lastSaleDate: formData.date,
       }
     }
@@ -479,11 +482,46 @@ export default function SalesPage() {
   }
 
   const handleVoidSale = (saleId: string) => {
-    if (!window.confirm(`Delete sale ${saleId}? It will remain recoverable for 30 days.`)) return
+    const sale = state.sales.find((item) => item.id === saleId)
+    if (!sale || sale.status === 'VOID') return
+    if (!window.confirm(`Void sale ${saleId}? Stock will be restored and any payment recorded on this sale will be reversed.`)) return
     const purgeAfter = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
-    const updatedSales = state.sales.map((sale) => (sale.id === saleId ? { ...sale, status: 'VOID', deletedAt: new Date().toISOString(), purgeAfter } : sale))
-    updateState({ sales: updatedSales })
-    addAuditLog('DELETE', 'SALE', saleId, `Sale ${saleId} was deleted and retained until ${purgeAfter}.`)
+    const amountPaid = Number(sale.amountPaid ?? (sale.paymentStatus === 'PAID' ? sale.totalAmount : 0))
+    const destination = sale.paymentAccount
+      || state.bankAccounts.find((account) => account.name.toLowerCase().includes('cash'))?.name
+      || state.bankAccounts[0]?.name
+      || ''
+    const movedCash = amountPaid > 0
+      ? moveBankBalance(state.bankAccounts, state.banks, '', destination, -amountPaid)
+      : { bankAccounts: state.bankAccounts, banks: state.banks }
+    const nextReceivables = state.receivables.map((record) => {
+      const linked = record.sourceSaleId === sale.id || record.invoice === sale.id || record.reference === sale.id
+      if (!linked) return record
+      const total = Number(record.total || record.amount || 0)
+      return { ...record, balance: 0, balanceDue: 0, outstanding_amount: 0, status: 'Paid', paid: total, amountPaid: total }
+    })
+    const reversalTxn = amountPaid > 0 ? [{
+      id: makeID('TXN'),
+      date: getCurrentDate(),
+      name: sale.customer,
+      activity: `Void reversal for ${sale.id}`,
+      method: sale.paymentMethod,
+      amount: -amountPaid,
+      status: 'Completed',
+      description: `Void reversal for sale ${sale.id}`,
+      attachments: 0,
+      type: 'Withdrawal',
+      bank: destination,
+    }] : []
+    updateState({
+      sales: state.sales.map((item) => (item.id === saleId ? { ...item, status: 'VOID', deletedAt: new Date().toISOString(), purgeAfter } : item)),
+      inventory: restoreSoldItemsToInventory(state.inventory, sale.items || []),
+      banks: movedCash.banks,
+      bankAccounts: movedCash.bankAccounts,
+      bankTxns: [...reversalTxn, ...state.bankTxns],
+      receivables: nextReceivables,
+    })
+    addAuditLog('DELETE', 'SALE', saleId, `Sale ${saleId} was voided, stock restored, and retained until ${purgeAfter}.`)
   }
 
   return (

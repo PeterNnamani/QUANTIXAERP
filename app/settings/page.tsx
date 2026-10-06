@@ -11,6 +11,7 @@ import { formatCurrency } from '@/lib/utils'
 import { canEditPermission, getDefaultRoles, saveRoles, type RoleDefinition, type PermissionKey } from '@/lib/rbac'
 import { CLOSE_ACCOUNT_PHRASE, isSuperAdminRole, wipeConfirmationPhrase } from '@/lib/company-lifecycle'
 import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
+import { applyTransactionStockMovements, mergeImportedProductRows, saveInventoryRows } from '@/lib/inventory-workflows'
 import { dedupeChartOfAccounts, requiredFinancialPositionAccounts } from '@/lib/accounting/chart-of-accounts'
 
 const sidebarSections = [
@@ -269,18 +270,19 @@ export default function SettingsPage() {
         ])
       ).filter(Boolean)
 
-      const nextInventory = [
-        ...state.inventory,
-        ...(payload.products || []).map((product: any) => ({
-          product: String(product.name || product.sku || 'Imported Item'),
-          dept: String(product.category || product.dept || 'General'),
-          openQty: Number(product.stock_qty || product.openQty || product.closing || 0),
-          purchased: Number(product.purchased || 0),
-          sold: Number(product.sold || 0),
-          unitCost: Number(product.unit_cost || product.unitCost || 0),
-          closing: Number(product.stock_qty || product.closing || 0),
-        })),
-      ]
+      const existingSaleKeys = new Set(state.sales.flatMap((sale) => [String(sale.id), String((sale as { reference?: string }).reference || '')].filter(Boolean)))
+      const existingPurchaseKeys = new Set(state.purchases.flatMap((purchase) => [String(purchase.id), String(purchase.reference || ''), String(purchase.invoiceNumber || '')].filter(Boolean)))
+      const newSales = (payload.sales || []).filter((sale: any) => !existingSaleKeys.has(String(sale.reference || sale.id || '')))
+      const newPurchases = (payload.purchases || []).filter((purchase: any) => !existingPurchaseKeys.has(String(purchase.reference || purchase.id || purchase.invoiceNumber || '')))
+      const nextInventory = applyTransactionStockMovements(
+        applyTransactionStockMovements(mergeImportedProductRows(state.inventory, payload.products || []), newPurchases, 'purchased'),
+        newSales,
+        'sold',
+      )
+      if (user?.companyId && nextInventory.length > 0 && ((payload.products || []).length > 0 || newSales.length > 0 || newPurchases.length > 0)) {
+        const client = getSupabaseClient()
+        if (client) await saveInventoryRows(client, user.companyId, nextInventory)
+      }
 
       const nextStaff = [...state.staffMembers, ...(payload.staff || []).map((staff: any) => ({
         id: staff.id || '',
@@ -302,8 +304,8 @@ export default function SettingsPage() {
       }))]
 
       updateState({
-        sales: [...state.sales, ...((payload.sales || []) as any[])],
-        purchases: [...state.purchases, ...((payload.purchases || []) as any[])],
+        sales: [...state.sales, ...(newSales as any[])],
+        purchases: [...state.purchases, ...(newPurchases as any[])],
         inventory: nextInventory,
         supplierList: nextSupplierList,
         customerList: nextCustomerList,

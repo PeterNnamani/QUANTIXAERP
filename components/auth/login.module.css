@@ -4,6 +4,7 @@
   grid-template-columns: 1.05fr 1fr;
   min-height: 100vh;
   background: #0b1220;
+  color-scheme: light;
 }
 
 @media (max-width: 960px) {
@@ -206,34 +207,55 @@
 .input {
   width: 100%;
   height: 44px;
-  padding: 0 14px 0 40px;
+  padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid #dbe3ef;
-  background: #fbfcfe;
+  border: 1px solid #b7c4d8;
+  background-color: #ffffff;
   color: #0f1b33;
+  caret-color: #0f1b33;
+  -webkit-text-fill-color: #0f1b33;
   font-size: 14px;
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 
+.inputWrap:has(.inputIcon) .input {
+  padding-left: 40px;
+}
+
 .input::placeholder {
-  color: #a2aec4;
+  color: #6f7d96;
+  -webkit-text-fill-color: #6f7d96;
+  opacity: 1;
 }
 
 .input:hover {
-  border-color: #c7d3e6;
+  border-color: #8fa0bb;
 }
 
+.input:focus,
 .input:focus-visible {
   border-color: #2f6bff;
-  background: #ffffff;
+  background-color: #ffffff;
+  color: #0f1b33;
+  -webkit-text-fill-color: #0f1b33;
   box-shadow: 0 0 0 4px rgba(47, 107, 255, 0.14);
 }
 
 .input:disabled {
-  background: #f2f5fa;
+  background-color: #f2f5fa;
   color: #94a0b8;
+  -webkit-text-fill-color: #94a0b8;
   cursor: not-allowed;
+}
+
+.input:-webkit-autofill,
+.input:-webkit-autofill:hover,
+.input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #0f1b33;
+  caret-color: #0f1b33;
+  box-shadow: 0 0 0 1000px #ffffff inset;
+  transition: background-color 9999s ease-out;
 }
 
 .inputIcon {
@@ -403,4 +425,101 @@
 
 .fullWidth {
   grid-column: 1 / -1;
+}
+
+.hint {
+  font-size: 12px;
+  color: #67748c;
+}
+
+/* ---- Dark theme: keep every field readable ---- */
+:global(html[data-theme='dark']) .shell {
+  color-scheme: dark;
+}
+
+:global(html[data-theme='dark']) .cardSide {
+  background:
+    radial-gradient(90% 60% at 50% 0%, rgba(47, 107, 255, 0.12), transparent 60%),
+    #0f172a;
+}
+
+:global(html[data-theme='dark']) .card {
+  background: #151e32;
+  border-color: rgba(148, 163, 184, 0.22);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.24),
+    0 16px 36px -16px rgba(0, 0, 0, 0.55);
+}
+
+:global(html[data-theme='dark']) .cardTitle {
+  color: #f1f5ff;
+}
+
+:global(html[data-theme='dark']) .cardSub,
+:global(html[data-theme='dark']) .hint {
+  color: #9aa8c2;
+}
+
+:global(html[data-theme='dark']) .label {
+  color: #d5deef;
+}
+
+:global(html[data-theme='dark']) .input {
+  background-color: #0d1728;
+  border-color: #5b6d8c;
+  color: #f4f7ff;
+  caret-color: #f4f7ff;
+  -webkit-text-fill-color: #f4f7ff;
+}
+
+:global(html[data-theme='dark']) .input::placeholder {
+  color: #93a1bb;
+  -webkit-text-fill-color: #93a1bb;
+}
+
+:global(html[data-theme='dark']) .input:hover {
+  border-color: #7b8eae;
+}
+
+:global(html[data-theme='dark']) .input:focus,
+:global(html[data-theme='dark']) .input:focus-visible {
+  border-color: #6b93ff;
+  background-color: #102038;
+  color: #f4f7ff;
+  -webkit-text-fill-color: #f4f7ff;
+  box-shadow: 0 0 0 4px rgba(107, 147, 255, 0.22);
+}
+
+:global(html[data-theme='dark']) .input:disabled {
+  background-color: #121a2b;
+  color: #7d8aa6;
+  -webkit-text-fill-color: #7d8aa6;
+}
+
+:global(html[data-theme='dark']) .input:-webkit-autofill,
+:global(html[data-theme='dark']) .input:-webkit-autofill:hover,
+:global(html[data-theme='dark']) .input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #f4f7ff;
+  caret-color: #f4f7ff;
+  box-shadow: 0 0 0 1000px #0d1728 inset;
+}
+
+:global(html[data-theme='dark']) .inputIcon {
+  color: #9aa8c2;
+}
+
+:global(html[data-theme='dark']) .remember {
+  color: #c5d0e6;
+}
+
+:global(html[data-theme='dark']) .error {
+  background: #3f1b1b;
+  border-color: #7a3a3a;
+  color: #ffdcdd;
+}
+
+:global(html[data-theme='dark']) .notice {
+  background: #17233a;
+  border-color: rgba(126, 162, 255, 0.28);
+  color: #c9d6ee;
 }

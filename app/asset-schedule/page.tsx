@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting, type Purchase } from '@/lib/context'
 import { formatCurrency, formatCurrencyOrZero, formatNumber, triggerAppToast } from '@/lib/utils'
+import { financialPositionOpenings, isOpeningBalanceRow, OPENING_ROW_IDS } from '@/lib/opening-balances'
 import { downloadExcel } from '@/lib/export-utils'
 import AddAssetModal from '@/components/modals/AddAssetModal'
 import AssetLifecycleModal from '@/components/modals/AssetLifecycleModal'
@@ -53,9 +54,10 @@ export default function AssetSchedulePage() {
         [assetPurchases]
     )
 
+    const openings = financialPositionOpenings(state.chartOfAccounts)
     const totalAssetValue = useMemo(
-        () => assetPurchases.reduce((sum, purchase) => sum + (purchase.total || 0), 0),
-        [assetPurchases]
+        () => assetPurchases.reduce((sum, purchase) => sum + (purchase.total || 0), 0) + openings.ppe,
+        [assetPurchases, openings.ppe]
     )
 
     const accumulatedDepreciation = useMemo(
@@ -78,8 +80,8 @@ export default function AssetSchedulePage() {
     )
 
     const assetRows = useMemo<AssetRow[]>(
-        () =>
-            assetPurchases.map((purchase) => ({
+        () => {
+            const rows = assetPurchases.map((purchase) => ({
                 id: purchase.id,
                 name: purchase.product,
                 category: purchase.category || 'Assets',
@@ -92,8 +94,22 @@ export default function AssetSchedulePage() {
                 branch: purchase.branch || 'Head Office',
                 paymentMethod: purchase.paymentMethod || 'Cash',
             }))
-        ,
-        [assetPurchases]
+            if (openings.ppe <= 0) return rows
+            return [{
+                id: OPENING_ROW_IDS.ppe,
+                name: 'Opening balance',
+                category: 'Assets',
+                purchaseDate: openings.ppeDate || '—',
+                cost: formatCurrency(openings.ppe),
+                depreciation: formatCurrencyOrZero(0),
+                bookValue: formatCurrency(openings.ppe),
+                status: 'Opening',
+                supplier: 'Brought forward',
+                branch: 'Head Office',
+                paymentMethod: 'Opening',
+            }, ...rows]
+        },
+        [assetPurchases, openings.ppe, openings.ppeDate]
     )
 
     const [selectedAssetId, setSelectedAssetId] = useState<string | null>(assetRows[0]?.id ?? null)
@@ -153,7 +169,12 @@ export default function AssetSchedulePage() {
             return
         }
         const selectedPurchase = assetPurchases.find((purchase) => purchase.id === selectedAsset.id)
-        if (!selectedPurchase || !lifecycleAction) return
+        if (!selectedPurchase || !lifecycleAction) {
+            if (isOpeningBalanceRow(selectedAsset.id)) {
+                triggerAppToast('Opening balance', 'Change the PPE opening in Settings > Opening Balances.')
+            }
+            return
+        }
         const nextPurchases = state.purchases.map((purchase) => {
             if (purchase.id !== selectedPurchase.id) return purchase
             if (lifecycleAction === 'transfer') return { ...purchase, branch: values.branch || purchase.branch, notes: `${purchase.notes || ''}\nTransferred: ${values.reason || 'Branch transfer'}`.trim() }

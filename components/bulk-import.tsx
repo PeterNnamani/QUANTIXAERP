@@ -3,7 +3,9 @@
 import { useRef, useState, type ChangeEvent, type CSSProperties } from 'react'
 import { FileUp, ListOrdered, X } from 'lucide-react'
 import { useAccounting } from '@/lib/context'
+import { getSupabaseClient } from '@/lib/supabase.browser'
 import { parseSpreadsheetFile, prepareGenericImportPayload, type ImportSummary } from '@/lib/import-utils'
+import { applyTransactionStockMovements, mergeImportedProductRows, saveInventoryRows } from '@/lib/inventory-workflows'
 
 export default function BulkImport({ label = 'Bulk upload', tableColumns, onImportComplete }: { label?: string; tableColumns: string[]; onImportComplete?: () => void }) {
     const { state, updateState, user, addAuditLog } = useAccounting()
@@ -99,46 +101,25 @@ export default function BulkImport({ label = 'Bulk upload', tableColumns, onImpo
             const importedStaff = prepared.payload.staff.map((staff: any) => ({
                 id: String(staff.id), name: String(staff.name), staffId: String(staff.staffId || ''), pin: String(staff.pin || ''), roleId: String(staff.roleId || 'staff'), roleName: String(staff.roleName || 'Staff'), permissions: staff.permissions || ['dashboard'], dataScope: 'team' as const, status: staff.status === 'disabled' ? 'disabled' as const : 'active' as const, createdAt: String(staff.createdAt), username: String(staff.username || ''), email: String(staff.email || ''), phone: String(staff.phone || ''), branch: String(staff.branch || ''), department: String(staff.department || ''), position: String(staff.position || ''),
             }))
-            const nextInventory = [...state.inventory]
-            const findInventoryIndex = (product: any) => {
-                const sku = String(product.sku || '').trim().toLowerCase()
-                const name = String(product.name || product.product || product.item || '').trim().toLowerCase()
-                return nextInventory.findIndex((item) => (sku && item.sku?.toLowerCase() === sku) || (name && item.product.toLowerCase() === name))
+            const existingSaleKeys = new Set(state.sales.flatMap((sale) => [String(sale.id), String((sale as { reference?: string }).reference || '')].filter(Boolean)))
+            const existingPurchaseKeys = new Set(state.purchases.flatMap((purchase) => [String(purchase.id), String(purchase.reference || ''), String(purchase.invoiceNumber || '')].filter(Boolean)))
+            const newSales = prepared.payload.sales.filter((sale: any) => !existingSaleKeys.has(String(sale.reference || sale.id || '')))
+            const newPurchases = prepared.payload.purchases.filter((purchase: any) => !existingPurchaseKeys.has(String(purchase.reference || purchase.id || purchase.invoiceNumber || '')))
+            const nextInventory = applyTransactionStockMovements(
+                applyTransactionStockMovements(mergeImportedProductRows(state.inventory, prepared.payload.products), newPurchases, 'purchased'),
+                newSales,
+                'sold',
+            )
+            if (user.companyId && nextInventory.length > 0 && (prepared.payload.products.length > 0 || newSales.length > 0 || newPurchases.length > 0)) {
+                const client = getSupabaseClient()
+                if (!client) throw new Error('Inventory could not be saved because the database connection is missing.')
+                await saveInventoryRows(client, user.companyId, nextInventory)
             }
-
-            prepared.payload.products.forEach((product: any) => {
-                const productIndex = findInventoryIndex(product)
-                const inventoryProduct = { product: String(product.name || product.product), sku: String(product.sku || ''), description: String(product.description || ''), branch: String(product.branch || ''), dept: String(product.category || 'General'), openQty: Number(product.stock_qty ?? product.openQty ?? 0), purchased: Number(product.purchased || 0), sold: Number(product.sold || 0), unitCost: Number(product.unit_cost ?? product.unitCost ?? 0), sellingPrice: Number(product.unit_price ?? product.sellingPrice ?? 0), closing: Number(product.stock_qty ?? product.openQty ?? product.closing ?? 0) }
-                if (productIndex >= 0) {
-                    nextInventory[productIndex] = { ...nextInventory[productIndex], ...inventoryProduct }
-                } else {
-                    nextInventory.push(inventoryProduct)
-                }
-            })
-
-            const applyStockMovement = (transactions: any[], movement: 'purchased' | 'sold') => {
-                transactions.forEach((transaction) => {
-                    const item = transaction.items?.[0]
-                    if (!item) return
-                    const productIndex = findInventoryIndex({ name: item.product, sku: item.sku })
-                    if (productIndex < 0) return
-                    const quantity = Math.max(0, Number(item.qty || item.quantity || 0))
-                    const current = nextInventory[productIndex]
-                    nextInventory[productIndex] = {
-                        ...current,
-                        [movement]: (current[movement] || 0) + quantity,
-                        closing: Math.max(0, (current.closing || 0) + (movement === 'purchased' ? quantity : -quantity)),
-                    }
-                })
-            }
-
-            applyStockMovement(prepared.payload.purchases, 'purchased')
-            applyStockMovement(prepared.payload.sales, 'sold')
             const importedCustomers = prepared.payload.contacts.filter((contact: any) => contact.type === 'customer').map((contact: any) => String(contact.name))
             const importedSuppliers = prepared.payload.contacts.filter((contact: any) => contact.type === 'supplier' || contact.type === 'vendor').map((contact: any) => String(contact.name))
             const updates: Record<string, unknown> = { inventory: nextInventory }
-            if (prepared.payload.sales.length > 0) updates.sales = [...state.sales, ...prepared.payload.sales]
-            if (prepared.payload.purchases.length > 0) updates.purchases = [...state.purchases, ...prepared.payload.purchases]
+            if (newSales.length > 0) updates.sales = [...state.sales, ...newSales]
+            if (newPurchases.length > 0) updates.purchases = [...state.purchases, ...newPurchases]
             if (importedExpenses.length > 0) updates.expenses = [...state.expenses, ...importedExpenses]
             if (importedStaff.length > 0) updates.staffMembers = [...state.staffMembers, ...importedStaff]
             if (importedCustomers.length > 0) updates.customerList = Array.from(new Set([...state.customerList, ...importedCustomers]))

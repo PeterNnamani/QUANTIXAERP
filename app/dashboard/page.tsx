@@ -5,6 +5,7 @@ import Link from 'next/link'
 import AppLayout from '@/components/layout/app-layout'
 import { useAccounting } from '@/lib/context'
 import { businessHealth, dateKey, dueOn, overdueAmount, outstanding, percentChange, performanceSeries, seriesForDays, sumOnDate } from '@/lib/dashboard-metrics'
+import { dashboardCashOpening, financialPositionOpenings } from '@/lib/opening-balances'
 import { planCanAccessRoute } from '@/lib/licensing'
 import { roleHasPermission } from '@/lib/rbac'
 import { formatCurrency, formatNumber } from '@/lib/utils'
@@ -53,12 +54,14 @@ export default function DashboardPage() {
     const expensesYesterday = sumOnDate(expenseSeries, yesterday) + sumOnDate(purchaseSeries, yesterday)
     const profitToday = revenueToday - expensesToday
     const profitYesterday = revenueYesterday - expensesYesterday
+    const openings = financialPositionOpenings(state.chartOfAccounts)
     const accountNames = new Set(state.bankAccounts.map((account) => account.name))
     const accountCash = state.bankAccounts.filter((account) => String(account.status || 'active').toLowerCase() === 'active').reduce((sum, account) => sum + Number(account.balance || 0), 0)
     const unassignedCash = Object.entries(state.banks).reduce((sum, [name, balance]) => accountNames.has(name) ? sum : sum + Number(balance || 0), 0)
-    const cashAvailable = state.bankAccounts.length > 0 ? accountCash + unassignedCash : Object.values(state.banks).reduce((sum, balance) => sum + Number(balance || 0), 0)
-    const receivablesBalance = state.receivables.reduce((sum, item) => sum + outstanding(item), 0)
-    const payablesBalance = state.payables.reduce((sum, item) => sum + outstanding(item), 0)
+    const hasBankAccounts = state.bankAccounts.length > 0
+    const cashAvailable = (hasBankAccounts ? accountCash + unassignedCash : Object.values(state.banks).reduce((sum, balance) => sum + Number(balance || 0), 0)) + dashboardCashOpening(openings, hasBankAccounts)
+    const receivablesBalance = state.receivables.reduce((sum, item) => sum + outstanding(item), 0) + openings.receivables
+    const payablesBalance = state.payables.reduce((sum, item) => sum + outstanding(item), 0) + openings.payables
     const receivablesOverdue = overdueAmount(state.receivables, today)
     const payablesOverdue = overdueAmount(state.payables, today)
     const receivablesDue = dueOn(state.receivables, today)
@@ -142,9 +145,9 @@ export default function DashboardPage() {
                         { label: 'Revenue today', value: revenueToday, trend: percentChange(revenueToday, revenueYesterday), spark: revenueSpark, note: 'Compared with yesterday' },
                         { label: 'Expenses today', value: expensesToday, trend: percentChange(expensesToday, expensesYesterday), spark: expenseSpark, note: 'Purchases and expenses versus yesterday' },
                         { label: 'Profit today', value: profitToday, trend: percentChange(profitToday, profitYesterday), spark: profitSpark, note: 'Revenue minus today’s costs' },
-                        { label: 'Cash available', value: cashAvailable, trend: cashAvailable >= 0 ? 'Live' : 'Overdrawn', spark: null, note: 'Sum of active bank balances' },
-                        { label: 'Receivables', value: receivablesBalance, trend: receivablesOverdue > 0 ? `${formatCurrency(receivablesOverdue)} overdue` : 'None overdue', spark: null, note: 'Open customer balances' },
-                        { label: 'Payables', value: payablesBalance, trend: payablesOverdue > 0 ? `${formatCurrency(payablesOverdue)} overdue` : 'None overdue', spark: null, note: 'Open supplier balances' },
+                        { label: 'Cash available', value: cashAvailable, trend: cashAvailable >= 0 ? 'Live' : 'Overdrawn', spark: null, note: hasBankAccounts ? 'Sum of active bank balances' : 'Opening cash and bank balances' },
+                        { label: 'Receivables', value: receivablesBalance, trend: receivablesOverdue > 0 ? `${formatCurrency(receivablesOverdue)} overdue` : 'None overdue', spark: null, note: openings.receivables > 0 ? 'Open customer balances including opening' : 'Open customer balances' },
+                        { label: 'Payables', value: payablesBalance, trend: payablesOverdue > 0 ? `${formatCurrency(payablesOverdue)} overdue` : 'None overdue', spark: null, note: openings.payables > 0 ? 'Open supplier balances including opening' : 'Open supplier balances' },
                     ].map((card) => (
                         <article key={card.label} className="kpi-card">
                             <div className="kpi-card-top">
