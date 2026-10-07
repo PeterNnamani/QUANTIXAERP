@@ -1,5 +1,5 @@
 function skuPrefix(productName: string): string {
-    const words = productName
+    const words = String(productName || '')
         .trim()
         .toUpperCase()
         .split(/[^A-Z0-9]+/)

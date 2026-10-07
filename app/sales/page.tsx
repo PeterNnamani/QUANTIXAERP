@@ -193,7 +193,7 @@ export default function SalesPage() {
       return
     }
 
-    const inventoryUpdates = [...state.inventory]
+    const inventoryUpdates = [...(state.inventory || [])]
     for (const item of formData.items) {
       const qty = Number(item.qty) || 0
       const inventoryIndex = inventoryUpdates.findIndex((inventoryItem) => inventoryItem.product.toLowerCase() === item.product.toLowerCase())
@@ -246,7 +246,7 @@ export default function SalesPage() {
     const destination = isCashPayment
       ? accountOptions.find((account) => account.toLowerCase().includes('cash')) || accountOptions[0] || ''
       : sale.paymentAccount
-    const updatedBankAccounts = state.bankAccounts.map((account) => {
+    const updatedBankAccounts = (state.bankAccounts || []).map((account) => {
       if (!(isPaidSale || isPartPayment) || account.name !== destination) return account
       const balance = account.balance + amountPaid
       updatedBanks[account.name] = balance
@@ -274,12 +274,12 @@ export default function SalesPage() {
       : mergeReceivablesFromSales([sale], state.receivables)
 
     updateState({
-      sales: [sale, ...state.sales],
+      sales: [sale, ...(state.sales || [])],
       inventory: inventoryUpdates,
       banks: updatedBanks,
       bankAccounts: updatedBankAccounts,
-      bankTxns: [...paymentTxn, ...state.bankTxns],
-      receivables: nextReceivables,
+      bankTxns: [...paymentTxn, ...(state.bankTxns || [])],
+      receivables: nextReceivables || [],
     })
     setSelectedSaleId(sale.id)
     setCurrentPage(1)
@@ -299,8 +299,8 @@ export default function SalesPage() {
         const postedLines = Array.isArray(result.journalLines) ? result.journalLines : []
         if (postedJournals.length > 0 || postedLines.length > 0) {
           updateState({
-            journalEntries: [...postedJournals, ...state.journalEntries],
-            journalLines: [...postedLines, ...state.journalLines],
+            journalEntries: [...postedJournals, ...(state.journalEntries || [])],
+            journalLines: [...postedLines, ...(state.journalLines || [])],
           })
         }
       }

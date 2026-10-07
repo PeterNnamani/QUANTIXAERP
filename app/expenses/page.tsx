@@ -5,7 +5,7 @@ import { ArrowDownToLine, Check, CircleDollarSign, FileText, Filter, MoreHorizon
 import AppLayout from '@/components/layout/app-layout'
 import BulkImport from '@/components/bulk-import'
 import { Expense, useAccounting } from '@/lib/context'
-import { canEdit, EXP_CATS as DEFAULT_EXP_CATS, formatCurrency, getCurrentDate, makeID } from '@/lib/utils'
+import { EXP_CATS as DEFAULT_EXP_CATS, formatCurrency, getCurrentDate, makeID } from '@/lib/utils'
 import { canEditPermission } from '@/lib/rbac'
 import { getSupabaseClient } from '@/lib/supabase.browser'
 import { downloadExcel } from '@/lib/export-utils'
@@ -56,7 +56,8 @@ export default function ExpensesPage() {
     const expenses = useMemo(() => state.expenses.filter((expense) => expense.status !== 'VOID'), [state.expenses])
     const selectedExpense = expenses.find((expense) => expense.id === selectedId) || expenses[0]
     const normalizedRoles = [user?.role, user?.roleId, user?.roleName].filter(Boolean).map((value) => String(value).toLowerCase().replace(/[\s_]+/g, '-'))
-    const canApproveExpenses = normalizedRoles.some((role) => role.includes('manager') || ['md', 'business-owner'].includes(role)) || canEditPermission(user, 'expenses')
+    const canAddExpense = canEditPermission(user, 'expenses')
+    const canApproveExpenses = normalizedRoles.some((role) => role.includes('manager') || ['md', 'business-owner'].includes(role)) || canAddExpense
 
     const filteredExpenses = useMemo(() => {
         const query = search.toLowerCase().trim()
@@ -274,7 +275,7 @@ export default function ExpensesPage() {
     return (
         <AppLayout>
             <div className="module-shell expenses-workspace">
-                <header className="module-header"><div><div className="eyebrow">Operations / Finance</div><div className="module-title">Expenses</div><div className="module-subtitle">Track, manage, approve, and analyze business expenses.</div></div><div className="module-actions"><button className="btn btn-secondary" onClick={exportExpenses}><ArrowDownToLine size={15} /> Export</button><button className="btn btn-secondary" onClick={() => setShowFilters((value) => !value)}><Filter size={15} /> Filters</button>{canEdit(user?.role || '') && <button className="btn btn-primary" onClick={() => setShowForm(true)}><Plus size={16} /> Add Expense</button>}</div></header>
+                <header className="module-header"><div><div className="eyebrow">Operations / Finance</div><div className="module-title">Expenses</div><div className="module-subtitle">Track, manage, approve, and analyze business expenses.</div></div><div className="module-actions"><button className="btn btn-secondary" onClick={exportExpenses}><ArrowDownToLine size={15} /> Export</button><button className="btn btn-secondary" onClick={() => setShowFilters((value) => !value)}><Filter size={15} /> Filters</button>{canAddExpense && <button className="btn btn-primary" onClick={() => setShowForm(true)}><Plus size={16} /> Add Expense</button>}</div></header>
                 <nav className="expense-tabs" aria-label="Expense views">{(['Expenses', 'Reimbursements', 'Recurring', 'Categories'] as Tab[]).map((tab) => <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => setActiveTab(tab)}>{tab}{tab === 'Expenses' && <span>{expenses.length}</span>}</button>)}</nav>
                 <div className="module-actions"><BulkImport label="Bulk upload" onImportComplete={() => setPeriod('All dates')} tableColumns={['Date', 'Expense #', 'Description', 'Category', 'Vendor', 'Amount', 'Tax', 'Total', 'Payment', 'Account', 'Status']} /></div>
                 {activeTab === 'Expenses' && <>

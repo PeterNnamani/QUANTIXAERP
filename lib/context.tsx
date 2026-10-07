@@ -642,7 +642,7 @@ function normalizeInventorySkus(inventory: InventoryItem[]): InventoryItem[] {
   const usedSkus = inventory.map((item) => item.sku).filter((sku): sku is string => Boolean(sku))
   return inventory.map((item) => {
     if (item.sku) return item
-    const sku = generateSku(item.product, usedSkus)
+    const sku = generateSku(item.product || 'Product', usedSkus)
     usedSkus.push(sku)
     return { ...item, sku }
   })
@@ -1050,6 +1050,12 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
             inventory: Array.isArray(parsedState.inventory) ? normalizeInventorySkus(parsedState.inventory) : defaultState.inventory,
             roles: Array.isArray(parsedState.roles) && parsedState.roles.length > 0 ? parsedState.roles : defaultState.roles,
             staffMembers: Array.isArray(parsedState.staffMembers) ? parsedState.staffMembers : defaultState.staffMembers,
+            sales: Array.isArray(parsedState.sales) ? parsedState.sales : defaultState.sales,
+            bankAccounts: Array.isArray(parsedState.bankAccounts) ? parsedState.bankAccounts : defaultState.bankAccounts,
+            bankTxns: Array.isArray(parsedState.bankTxns) ? parsedState.bankTxns : defaultState.bankTxns,
+            receivables: Array.isArray(parsedState.receivables) ? parsedState.receivables : defaultState.receivables,
+            journalEntries: Array.isArray(parsedState.journalEntries) ? parsedState.journalEntries : defaultState.journalEntries,
+            journalLines: Array.isArray(parsedState.journalLines) ? parsedState.journalLines : defaultState.journalLines,
           })
         } catch (error) {
           console.error('Unable to restore saved company books', error)
@@ -1068,7 +1074,11 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         : updates
       const newState = { ...prev, ...normalizedUpdates }
       if (companyId) {
-        localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(newState))
+        try {
+          localStorage.setItem(`${STORAGE_KEY}:${companyId}`, JSON.stringify(newState))
+        } catch (error) {
+          console.error('Unable to cache company books locally', error)
+        }
       }
       // Persist banks and bank transactions to Supabase where possible
       ; (async () => {
@@ -1150,7 +1160,12 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
 
           if (normalizedUpdates.sales) {
             const sales = normalizedUpdates.sales as Sale[]
-            for (const sale of sales) {
+            const previousSales = new Map((prev.sales || []).map((sale) => [sale.id, sale]))
+            const salesToPersist = sales.filter((sale) => {
+              const previous = previousSales.get(sale.id)
+              return !previous || JSON.stringify(previous) !== JSON.stringify(sale)
+            })
+            for (const sale of salesToPersist) {
               const customerName = sale.customer || 'Walk-in Customer'
               let { data: customer } = await supabase.from('contacts').select('id').eq('company_id', companyId).eq('type', 'customer').eq('name', customerName).maybeSingle()
               if (!customer) {
@@ -1179,7 +1194,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
                 purge_after: (sale as any).purgeAfter || null,
               }
               const { data: storedSale, error: saleError } = await upsertSaleWithSchemaFallback(saleRow)
-              if (saleError) throw saleError
+              if (saleError || !storedSale) throw saleError || new Error('Sale could not be saved.')
               const { error: deleteItemsError } = await supabase.from('sale_items').delete().eq('sale_id', storedSale.id)
               if (deleteItemsError) throw deleteItemsError
               if (sale.items?.length) {
@@ -1515,7 +1530,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
               opening_balance: account.openingBalance,
               opening_balance_date: account.openingBalanceDate || null,
               balance: account.balance,
-              status: account.status.toLowerCase(),
+              status: String(account.status || 'active').toLowerCase(),
               updated_at: new Date().toISOString(),
             }))
             const { error: bankAccountsPersistErr } = await supabase.from('bank_accounts').upsert(bankRows, { onConflict: 'id' })
