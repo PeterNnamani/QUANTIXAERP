@@ -3,7 +3,7 @@
 import AppLayout from '@/components/layout/app-layout'
 import { useEffect, useState } from 'react'
 import { useAccounting } from '@/lib/context'
-import { normalizePlanName } from '@/lib/licensing'
+import { normalizePlanName, plansMatch } from '@/lib/licensing'
 
 declare global {
     interface Window {
@@ -148,11 +148,28 @@ export default function SubscriptionAndLicensingPage() {
     const { user, activateSubscription } = useAccounting()
     const [loadingPlan, setLoadingPlan] = useState<string | null>(null)
     const [activeSubscription, setActiveSubscription] = useState<ActiveSubscription | null>(null)
+    const [intendedPlan, setIntendedPlan] = useState<string | null>(null)
     const [message, setMessage] = useState('')
 
     useEffect(() => {
         void loadPaystack().catch(() => setMessage('Unable to load the Paystack payment window.'))
+        setIntendedPlan(normalizePlanName(new URLSearchParams(window.location.search).get('plan')))
     }, [])
+
+    useEffect(() => {
+        if (user?.subscriptionStatus !== 'active') return
+        const planName = normalizePlanName(user.subscriptionPlan)
+        if (!planName) return
+        setActiveSubscription((current) => {
+            if (current?.status === 'active' && plansMatch(current.planName, planName)) return { ...current, planName }
+            return {
+                planName,
+                status: 'active',
+                startsAt: current?.startsAt || new Date().toISOString(),
+                nextPaymentDate: current?.nextPaymentDate || getNextPaymentDate(new Date().toISOString()).toISOString(),
+            }
+        })
+    }, [user?.subscriptionPlan, user?.subscriptionStatus])
 
     useEffect(() => {
         if (!user?.companyId) return
@@ -160,15 +177,16 @@ export default function SubscriptionAndLicensingPage() {
             .then(async (response) => {
                 const result = await response.json()
                 if (!response.ok) throw new Error(result.error || 'Unable to load subscription.')
-                if (!result.subscription || result.subscription.status !== 'active') return
+                const planName = normalizePlanName(result.subscription?.plan_name)
+                if (!planName || result.subscription.status !== 'active') return
                 setActiveSubscription({
-                    planName: result.subscription.plan_name,
+                    planName,
                     status: result.subscription.status,
                     startsAt: result.subscription.starts_at,
                     nextPaymentDate: getNextPaymentDate(result.subscription.starts_at).toISOString(),
                 })
             })
-            .catch(() => setActiveSubscription(null))
+            .catch(() => undefined)
     }, [user?.companyId])
 
     const purchasePlan = async (plan: PlanCard) => {
@@ -202,9 +220,9 @@ export default function SubscriptionAndLicensingPage() {
                         })
                         const verification = await verifyResponse.json()
                         if (!verifyResponse.ok) throw new Error(verification.error || 'Payment verification failed.')
-                        const planName = normalizePlanName(verification.subscription.plan_name) || plan.name as 'Growth Edition' | 'Professional Edition' | 'Enterprise Edition'
+                        const planName = normalizePlanName(verification.subscription.plan_name) || normalizePlanName(plan.name) || plan.name as 'Growth Edition' | 'Professional Edition' | 'Enterprise Edition'
                         setActiveSubscription({
-                            planName: verification.subscription.plan_name,
+                            planName,
                             status: verification.subscription.status,
                             startsAt: verification.subscription.starts_at,
                             nextPaymentDate: getNextPaymentDate(verification.subscription.starts_at).toISOString(),
@@ -240,18 +258,27 @@ export default function SubscriptionAndLicensingPage() {
 
                 {message && <div className="pricing-note" role="status" style={{ marginBottom: '18px' }}>{message}</div>}
 
-                {user?.subscriptionStatus === 'trial' && user.trialEndsAt && (
+                {activeSubscription?.status === 'active' && (
+                    <div className="pricing-note" role="status" style={{ marginBottom: '18px' }}>
+                        Your active licence is {activeSubscription.planName}. Only this edition is marked Active.
+                    </div>
+                )}
+
+                {user?.subscriptionStatus === 'trial' && user.trialEndsAt && !activeSubscription && (
                     <div className="pricing-note" role="status" style={{ marginBottom: '18px' }}>
                         Full access trial active until {new Date(user.trialEndsAt).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' })}. Choose a plan before the trial ends to keep access.
                     </div>
                 )}
 
                 <div className="pricing-card-grid">
-                    {plans.map((plan) => (
-                        <div key={plan.name} className={`${plan.highlight ? 'pricing-card highlight' : 'pricing-card'}${activeSubscription?.planName === plan.name && activeSubscription.status === 'active' ? ' active-plan' : ''}`}>
+                    {plans.map((plan) => {
+                        const isActivePlan = Boolean(activeSubscription && activeSubscription.status === 'active' && plansMatch(activeSubscription.planName, plan.name))
+                        const isChosenPlan = !isActivePlan && plansMatch(intendedPlan, plan.name)
+                        return (
+                        <div key={plan.name} className={`${plan.highlight && !activeSubscription && !intendedPlan ? 'pricing-card highlight' : 'pricing-card'}${isActivePlan || isChosenPlan ? ' active-plan' : ''}`}>
                             <div className="plan-preface">
                                 <span className="plan-label">{plan.label}</span>
-                                {plan.highlight && <span className="plan-badge">Most popular</span>}
+                                {isActivePlan ? <span className="plan-badge">Your plan</span> : isChosenPlan ? <span className="plan-badge">Selected</span> : plan.highlight && !activeSubscription && !intendedPlan ? <span className="plan-badge">Most popular</span> : null}
                             </div>
                             <div className="plan-price">
                                 <span>{plan.price}</span>
@@ -278,18 +305,18 @@ export default function SubscriptionAndLicensingPage() {
                                     </div>
                                 ))}
                             </div>
-                            {activeSubscription?.planName === plan.name && activeSubscription.status === 'active' && (
+                            {isActivePlan && (
                                 <div className="plan-billing-summary">
                                     <span className="plan-active-status"><span className="plan-active-dot" />Active</span>
-                                    <span>Next payment: {new Date(activeSubscription.nextPaymentDate).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                                    <span>Next payment: {new Date(activeSubscription!.nextPaymentDate).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
                                     <strong>{formatAmount(plan.supportFee)} / month</strong>
                                 </div>
                             )}
-                            <button type="button" className={activeSubscription?.planName === plan.name && activeSubscription.status === 'active' ? 'btn plan-button active-plan-button allow-readonly' : 'btn btn-primary plan-button allow-readonly'} onClick={() => purchasePlan(plan)} disabled={loadingPlan !== null || (activeSubscription?.planName === plan.name && activeSubscription.status === 'active')}>
-                                {loadingPlan === plan.name ? 'Opening payment...' : activeSubscription?.planName === plan.name && activeSubscription.status === 'active' ? <><span className="plan-active-dot" />Active</> : 'Purchase'}
+                            <button type="button" className={isActivePlan ? 'btn plan-button active-plan-button allow-readonly' : 'btn btn-primary plan-button allow-readonly'} onClick={() => purchasePlan(plan)} disabled={loadingPlan !== null || isActivePlan}>
+                                {loadingPlan === plan.name ? 'Opening payment...' : isActivePlan ? <><span className="plan-active-dot" />Active</> : isChosenPlan ? 'Purchase selected plan' : 'Purchase'}
                             </button>
                         </div>
-                    ))}
+                    )})}
                 </div>
             </div>
         </AppLayout>

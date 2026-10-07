@@ -5,7 +5,7 @@ import {loadAllInventory, productsToInventory, saveInventoryRows} from '@/lib/in
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 import { supabase } from './supabase.browser'
 import { explicitAccessLevels, getDefaultRoles, menuAccessFromLevels, type AccessLevels, type PermissionKey, type RoleDefinition } from '@/lib/rbac'
-import { getTrialEndDate, isTrialActive, TRIAL_PLAN, type PlanName } from '@/lib/licensing'
+import { getTrialEndDate, isTrialActive, normalizePlanName, resolveVisibleSubscription, shouldKeepPaidSubscription, TRIAL_PLAN, type PlanName } from '@/lib/licensing'
 
 function missingSchemaColumn(error: unknown, values: Record<string, unknown>): string | null {
   if (typeof error !== 'object' || error === null || (error as { code?: string }).code !== 'PGRST204') return null
@@ -67,6 +67,7 @@ function enrichStoredUser(raw: any) {
 
   return {
     ...raw,
+    subscriptionPlan: normalizePlanName(raw.subscriptionPlan) || raw.subscriptionPlan,
     role: raw.role,
     permissions: savedAccess ? savedAccess.permissions : raw.permissions,
     visibleMenus,
@@ -454,6 +455,24 @@ const LOGIN_NOTIFICATION_KEY = 'quantixa_login_notification'
 const INACTIVITY_TIMEOUT_MS = 2 * 60 * 1000
 const REMEMBER_USERNAME_KEY = 'hw_remembered_username'
 
+function persistAuthUser(user: User) {
+  if (typeof window === 'undefined') return
+  const stored = localStorage.getItem(AUTH_KEY)
+  const storage = stored ? localStorage : sessionStorage
+  if (stored || sessionStorage.getItem(AUTH_KEY)) storage.setItem(AUTH_KEY, JSON.stringify(user))
+}
+
+function withSubscription(current: User, subscription: Pick<User, 'subscriptionPlan' | 'subscriptionStatus' | 'trialEndsAt'>): User {
+  const next = {
+    ...current,
+    subscriptionPlan: normalizePlanName(subscription.subscriptionPlan) || subscription.subscriptionPlan,
+    subscriptionStatus: subscription.subscriptionStatus,
+    trialEndsAt: subscription.subscriptionStatus === 'active' ? undefined : subscription.trialEndsAt,
+  }
+  persistAuthUser(next)
+  return next
+}
+
 const defaultState: AppState = {
   companySettings: {
     companyName: '', registrationNumber: '', tin: '', country: 'Nigeria', currency: 'NGN', timezone: 'Africa/Lagos',
@@ -817,7 +836,13 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           supabase.from('journal_entries').select('*').eq('company_id', companyId).order('entry_date', { ascending: false }).limit(1000),
           supabase.from('journal_lines').select('*').eq('company_id', companyId).limit(5000),
           supabase.from('audit_logs').select('*, users(full_name,username)').eq('company_id', companyId).order('event_time', { ascending: false }).limit(1000),
-          supabase.from('subscriptions').select('plan_name,status,starts_at,expires_at').eq('company_id', companyId).in('status', ['trial', 'active']).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+          fetch(`/api/payments/paystack/subscription?companyId=${encodeURIComponent(companyId)}`)
+            .then(async (response) => {
+              const result = await response.json().catch(() => ({}))
+              if (!response.ok) return { data: null, error: { message: result.error || 'Unable to load subscription.' } }
+              return { data: result.subscription || null, error: null }
+            })
+            .catch((error) => ({ data: null, error })),
         ])
 
         if (salesErr) console.error('Error loading sales from Supabase', salesErr)
@@ -918,28 +943,39 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
         if (companyData?.name && user.companyName !== companyData.name) {
           setUser((current) => current ? { ...current, companyName: companyData.name } : current)
         }
-        if (!subscriptionErr && subscriptionData?.status === 'active') {
-          if (trialExpiryTimer.current) clearTimeout(trialExpiryTimer.current)
-          setUser((current) => current ? { ...current, subscriptionPlan: subscriptionData.plan_name, subscriptionStatus: subscriptionData.status } : current)
-        } else if (!subscriptionErr && subscriptionData?.status === 'trial' && isTrialActive(subscriptionData.starts_at, new Date())) {
-          const trialEndsAt = subscriptionData.expires_at || getTrialEndDate(subscriptionData.starts_at)?.toISOString()
-          if (trialExpiryTimer.current) clearTimeout(trialExpiryTimer.current)
-          setUser((current) => current ? { ...current, subscriptionPlan: TRIAL_PLAN, subscriptionStatus: 'trial', trialEndsAt } : current)
-          if (trialEndsAt) {
-            trialExpiryTimer.current = setTimeout(() => {
-              setUser((current) => current ? { ...current, subscriptionPlan: undefined, subscriptionStatus: 'expired', trialEndsAt: undefined } : current)
-            }, Math.max(0, new Date(trialEndsAt).getTime() - Date.now()))
+        const resolvedSubscription = resolveVisibleSubscription(subscriptionData)
+        setUser((current) => {
+          if (!current) return current
+          if (resolvedSubscription?.status === 'active') {
+            if (trialExpiryTimer.current) clearTimeout(trialExpiryTimer.current)
+            return withSubscription(current, { subscriptionPlan: resolvedSubscription.planName, subscriptionStatus: 'active' })
           }
-        } else if (isTrialActive(companyData?.created_at)) {
-          const trialEndsAt = new Date(companyData.created_at)
-          trialEndsAt.setDate(trialEndsAt.getDate() + 14)
-          setUser((current) => current ? { ...current, subscriptionPlan: 'Professional Edition', subscriptionStatus: 'trial', trialEndsAt: trialEndsAt.toISOString() } : current)
-          trialExpiryTimer.current = setTimeout(() => {
-            setUser((current) => current ? { ...current, subscriptionPlan: undefined, subscriptionStatus: 'expired', trialEndsAt: undefined } : current)
-          }, Math.max(0, trialEndsAt.getTime() - Date.now()))
-        } else {
-          setUser((current) => current ? { ...current, subscriptionPlan: undefined, subscriptionStatus: 'expired', trialEndsAt: undefined } : current)
-        }
+          if (shouldKeepPaidSubscription(current, resolvedSubscription) || (subscriptionErr && current.subscriptionStatus === 'active' && normalizePlanName(current.subscriptionPlan))) {
+            return current
+          }
+          if (resolvedSubscription?.status === 'trial') {
+            if (trialExpiryTimer.current) clearTimeout(trialExpiryTimer.current)
+            if (resolvedSubscription.trialEndsAt) {
+              trialExpiryTimer.current = setTimeout(() => {
+                setUser((open) => open ? withSubscription(open, { subscriptionPlan: undefined, subscriptionStatus: 'expired', trialEndsAt: undefined }) : open)
+              }, Math.max(0, new Date(resolvedSubscription.trialEndsAt).getTime() - Date.now()))
+            }
+            return withSubscription(current, { subscriptionPlan: resolvedSubscription.planName, subscriptionStatus: 'trial', trialEndsAt: resolvedSubscription.trialEndsAt })
+          }
+          if (!subscriptionErr && isTrialActive(companyData?.created_at) && current.subscriptionStatus !== 'active') {
+            const trialEndsAt = getTrialEndDate(companyData.created_at)
+            if (trialEndsAt) {
+              trialExpiryTimer.current = setTimeout(() => {
+                setUser((open) => open ? withSubscription(open, { subscriptionPlan: undefined, subscriptionStatus: 'expired', trialEndsAt: undefined }) : open)
+              }, Math.max(0, trialEndsAt.getTime() - Date.now()))
+            }
+            return withSubscription(current, { subscriptionPlan: TRIAL_PLAN, subscriptionStatus: 'trial', trialEndsAt: trialEndsAt?.toISOString() })
+          }
+          if (subscriptionErr && (current.subscriptionStatus === 'active' || current.subscriptionStatus === 'trial')) {
+            return current
+          }
+          return withSubscription(current, { subscriptionPlan: undefined, subscriptionStatus: 'expired', trialEndsAt: undefined })
+        })
 
         if (!mounted || token !== remoteLoadToken.current) return
 
@@ -1650,19 +1686,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   }
 
   const activateSubscription = (subscription: Pick<User, 'subscriptionPlan' | 'subscriptionStatus' | 'trialEndsAt'>) => {
-    setUser((current) => {
-      if (!current) return current
-      const next = {
-        ...current,
-        subscriptionPlan: subscription.subscriptionPlan,
-        subscriptionStatus: subscription.subscriptionStatus,
-        trialEndsAt: subscription.subscriptionStatus === 'active' ? undefined : subscription.trialEndsAt,
-      }
-      const stored = localStorage.getItem(AUTH_KEY)
-      const storage = stored ? localStorage : sessionStorage
-      if (stored || sessionStorage.getItem(AUTH_KEY)) storage.setItem(AUTH_KEY, JSON.stringify(next))
-      return next
-    })
+    setUser((current) => current ? withSubscription(current, subscription) : current)
   }
 
   const logout = () => {

@@ -4,6 +4,7 @@ import React, { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
 import { savedMenuAccess } from '@/lib/rbac'
+import { normalizePlanName } from '@/lib/licensing'
 import { ONBOARDING_COMPLETED_KEY } from '@/components/entry-page'
 import styles from '@/components/auth/login.module.css'
 
@@ -102,6 +103,9 @@ function OnboardForm() {
         position: raw.position,
         accessLevels: raw.access_levels,
         status: raw.status,
+        subscriptionPlan: normalizePlanName(raw.subscription_plan) || undefined,
+        subscriptionStatus: raw.subscription_status || undefined,
+        trialEndsAt: raw.trial_ends_at || undefined,
       }
 
       const menuAccess =

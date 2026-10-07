@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAccounting } from '@/lib/context'
 import { savedMenuAccess } from '@/lib/rbac'
+import { normalizePlanName } from '@/lib/licensing'
 import styles from './login.module.css'
 
 export default function LoginPage() {
@@ -75,6 +76,9 @@ export default function LoginPage() {
         position: raw.position,
         accessLevels: raw.access_levels,
         status: raw.status,
+        subscriptionPlan: normalizePlanName(raw.subscription_plan) || undefined,
+        subscriptionStatus: raw.subscription_status || undefined,
+        trialEndsAt: raw.trial_ends_at || undefined,
       }
 
       const menuAccess =

@@ -6,6 +6,8 @@ import {
 } from '@/lib/supabase.server'
 import { getSupabaseConfigStatus } from '@/lib/env.server'
 import { verifyPin } from '@/lib/pin'
+import { loadCompanySubscription } from '@/lib/current-subscription'
+import { resolveVisibleSubscription } from '@/lib/licensing'
 
 type LoginBody = {
   username?: string
@@ -176,7 +178,18 @@ export async function POST(req: Request) {
       .update({ last_login: new Date().toISOString() })
       .eq('id', userRow.id)
 
-    return NextResponse.json({ user: profile })
+    const companyId = typeof profile.company_id === 'string' ? profile.company_id : ''
+    const { subscription } = companyId ? await loadCompanySubscription(companyId) : { subscription: null }
+    const visible = resolveVisibleSubscription(subscription)
+
+    return NextResponse.json({
+      user: {
+        ...profile,
+        subscription_plan: visible?.planName || null,
+        subscription_status: visible?.status || null,
+        trial_ends_at: visible?.trialEndsAt || null,
+      },
+    })
   } catch (error) {
     console.error('[login] unhandled error:', error)
     return NextResponse.json(

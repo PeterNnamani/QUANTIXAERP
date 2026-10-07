@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase.server'
+import { normalizePlanName } from '@/lib/licensing'
 import { normalizeBillingEmail, planAmountKobo, PLAN_PRICES_NGN } from '@/lib/paystack-subscription'
 
 async function resolveBillingEmail(companyId: string, email: unknown, staffId: unknown, username: unknown) {
@@ -20,8 +21,8 @@ async function resolveBillingEmail(companyId: string, email: unknown, staffId: u
 export async function POST(request: Request) {
     try {
         const { planName, companyId, email, staffId, username } = await request.json()
-        const plan = PLAN_PRICES_NGN[String(planName)] ? String(planName) : ''
-        const amount = planAmountKobo(plan)
+        const plan = normalizePlanName(planName) || ''
+        const amount = plan && PLAN_PRICES_NGN[plan] ? planAmountKobo(plan) : null
 
         if (!plan || !amount || !companyId) return NextResponse.json({ error: 'A valid plan, company, and email are required.' }, { status: 400 })
         if (!process.env.PAYSTACK_SECRET_KEY || !process.env.NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY) return NextResponse.json({ error: 'Paystack is not configured on the server.' }, { status: 500 })

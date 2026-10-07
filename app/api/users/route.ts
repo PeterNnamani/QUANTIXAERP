@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase.server'
+import { loadCompanySubscription } from '@/lib/current-subscription'
 import { seatLimitForSubscription } from '@/lib/licensing'
 
 type SupabaseWriteResult = { error: { message?: string } | null }
@@ -62,7 +63,7 @@ export async function POST(request: Request) {
             insertData.user_settings = payload.userSettings
         }
 
-        const { data: subscription } = await supabaseAdmin.from('subscriptions').select('plan_name,status').eq('company_id', payload.companyId).in('status', ['trial', 'active']).order('created_at', { ascending: false }).limit(1).maybeSingle()
+        const { subscription } = await loadCompanySubscription(payload.companyId)
         const userLimit = seatLimitForSubscription(subscription?.plan_name, subscription?.status)
         const { count: currentUserCount } = await supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('company_id', payload.companyId)
         const { data: existingByUsername } = await supabaseAdmin.from('users').select('id').eq('company_id', payload.companyId).eq('username', payload.username).limit(1)

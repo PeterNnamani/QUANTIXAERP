@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { getPlanUserLimit, getSubscriptionReplacementStatus, getTrialEndDate, isTrialActive, planCanAccessRoute, planHasFeature, seatLimitForSubscription, TRIAL_PLAN } from '../lib/licensing.ts'
+import { getPlanUserLimit, getSubscriptionReplacementStatus, getTrialEndDate, isTrialActive, pickCurrentSubscription, planCanAccessRoute, planHasFeature, plansMatch, resolveVisibleSubscription, seatLimitForSubscription, shouldKeepPaidSubscription, TRIAL_PLAN } from '../lib/licensing.ts'
 
 test('new companies receive full access for 14 days', () => {
     const startedAt = '2026-01-01T00:00:00.000Z'
@@ -58,4 +58,25 @@ test('user limits count the company owner seat', () => {
 test('replacing a subscription closes the previous state correctly', () => {
     assert.equal(getSubscriptionReplacementStatus('trial'), 'cancelled')
     assert.equal(getSubscriptionReplacementStatus('active'), 'superseded')
+})
+
+test('the paid plan is the current plan even if a later trial row exists', () => {
+    const current = pickCurrentSubscription([
+        { plan_name: 'Professional Edition', status: 'trial', created_at: '2026-03-02T00:00:00.000Z' },
+        { plan_name: 'Growth', status: 'active', created_at: '2026-03-01T00:00:00.000Z' },
+        { plan_name: 'Enterprise Edition', status: 'active', created_at: '2026-02-01T00:00:00.000Z' },
+    ])
+    assert.equal(current?.plan_name, 'Growth')
+    const visible = resolveVisibleSubscription(current)
+    assert.equal(visible?.planName, 'Growth Edition')
+    assert.equal(visible?.status, 'active')
+    assert.equal(plansMatch('Growth', 'Growth Edition'), true)
+})
+
+test('a paid session is not replaced by trial or missing subscription data', () => {
+    const paid = { subscriptionPlan: 'Growth Edition', subscriptionStatus: 'active' }
+    assert.equal(shouldKeepPaidSubscription(paid, { status: 'trial' }), true)
+    assert.equal(shouldKeepPaidSubscription(paid, null), true)
+    assert.equal(shouldKeepPaidSubscription(paid, { status: 'active', planName: 'Professional Edition' }), false)
+    assert.equal(shouldKeepPaidSubscription({ subscriptionPlan: 'Growth Edition', subscriptionStatus: 'trial' }, { status: 'trial' }), false)
 })

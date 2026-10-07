@@ -18,6 +18,7 @@ test('billing email must be a real address', () => {
 test('successful Paystack charges match the selected company and plan', () => {
     const payment = { amount: '45000000', currency: 'ngn', metadata: { companyId: 'co-1', planName: 'Growth Edition', referrer: 'https://app.example' } }
     assert.equal(paymentMatchesPlan(payment, 'Growth Edition', 'co-1'), true)
+    assert.equal(paymentMatchesPlan(payment, 'Growth', 'co-1'), true)
     assert.equal(paymentMatchesPlan(payment, 'Professional Edition', 'co-1'), false)
     assert.equal(paymentMatchesPlan(payment, 'Growth Edition', 'co-2'), false)
 })

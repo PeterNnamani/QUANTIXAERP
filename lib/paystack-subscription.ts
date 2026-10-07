@@ -1,3 +1,5 @@
+import { normalizePlanName } from './licensing.ts'
+
 export const PLAN_PRICES_NGN: Record<string, number> = {
     'Growth Edition': 450000,
     'Professional Edition': 650000,
@@ -5,7 +7,8 @@ export const PLAN_PRICES_NGN: Record<string, number> = {
 }
 
 export function planAmountKobo(planName: unknown): number | null {
-    const amount = PLAN_PRICES_NGN[String(planName)]
+    const plan = normalizePlanName(planName)
+    const amount = plan ? PLAN_PRICES_NGN[plan] : undefined
     return amount ? amount * 100 : null
 }
 
@@ -42,8 +45,11 @@ export function readPaystackMetadata(metadata: unknown): { companyId?: string; p
 export function paymentMatchesPlan(payment: { amount?: unknown; currency?: unknown; metadata?: unknown } | null | undefined, planName: string, companyId: string) {
     if (!payment) return false
     const metadata = readPaystackMetadata(payment.metadata)
-    return Number(payment.amount) === planAmountKobo(planName)
+    const selectedPlan = normalizePlanName(planName)
+    const paidPlan = normalizePlanName(metadata.planName)
+    return Boolean(selectedPlan)
+        && Number(payment.amount) === planAmountKobo(selectedPlan)
         && String(payment.currency || '').toUpperCase() === 'NGN'
         && metadata.companyId === String(companyId)
-        && metadata.planName === planName
+        && paidPlan === selectedPlan
 }

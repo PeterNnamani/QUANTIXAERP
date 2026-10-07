@@ -83,6 +83,71 @@ export function normalizePlanName(value: unknown): PlanName | null {
     return null
 }
 
+export function plansMatch(left: unknown, right: unknown): boolean {
+    const first = normalizePlanName(left)
+    const second = normalizePlanName(right)
+    return Boolean(first && second && first === second)
+}
+
+export type SubscriptionRow = {
+    id?: string
+    plan_name?: unknown
+    status?: unknown
+    starts_at?: string | null
+    expires_at?: string | null
+    created_at?: string | null
+}
+
+export type VisibleSubscription = {
+    planName: PlanName
+    status: 'active' | 'trial'
+    startsAt?: string | null
+    expiresAt?: string | null
+    trialEndsAt?: string
+}
+
+function subscriptionTimestamp(row: SubscriptionRow) {
+    const value = row.created_at || row.starts_at || ''
+    const time = new Date(value).getTime()
+    return Number.isNaN(time) ? 0 : time
+}
+
+export function pickCurrentSubscription<T extends SubscriptionRow>(rows: T[] | null | undefined): T | null {
+    const list = Array.isArray(rows) ? rows.filter(Boolean) : []
+    const newest = (status: string) => list
+        .filter((row) => String(row.status || '').toLowerCase() === status)
+        .sort((left, right) => subscriptionTimestamp(right) - subscriptionTimestamp(left))[0] || null
+    return newest('active') || newest('trial')
+}
+
+export function resolveVisibleSubscription(row: SubscriptionRow | null | undefined, now: Date | string = new Date()): VisibleSubscription | null {
+    if (!row) return null
+    const status = String(row.status || '').toLowerCase()
+    const planName = normalizePlanName(row.plan_name)
+    if (status === 'active' && planName) {
+        return { planName, status: 'active', startsAt: row.starts_at, expiresAt: row.expires_at }
+    }
+    if (status !== 'trial') return null
+    const startedAt = row.starts_at || row.created_at
+    if (!startedAt || !isTrialActive(startedAt, now)) return null
+    return {
+        planName: planName || TRIAL_PLAN,
+        status: 'trial',
+        startsAt: row.starts_at,
+        expiresAt: row.expires_at,
+        trialEndsAt: row.expires_at || getTrialEndDate(startedAt)?.toISOString() || undefined,
+    }
+}
+
+export function shouldKeepPaidSubscription(
+    current: { subscriptionPlan?: unknown; subscriptionStatus?: unknown } | null | undefined,
+    resolved: { status?: unknown } | null | undefined,
+) {
+    const paidPlan = normalizePlanName(current?.subscriptionPlan)
+    const currentlyPaid = String(current?.subscriptionStatus || '').toLowerCase() === 'active' && Boolean(paidPlan)
+    return currentlyPaid && String(resolved?.status || '').toLowerCase() !== 'active'
+}
+
 export function planHasFeature(plan: unknown, feature: string): boolean {
     const normalizedPlan = normalizePlanName(plan)
     if (!normalizedPlan) return false
