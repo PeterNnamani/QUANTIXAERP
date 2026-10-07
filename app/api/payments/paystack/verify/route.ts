@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase.server'
 import { getSubscriptionReplacementStatus } from '@/lib/licensing'
-
-const planAmounts: Record<string, number> = { 'Growth Edition': 45000000, 'Professional Edition': 65000000, 'Enterprise Edition': 90000000 }
+import { paymentMatchesPlan } from '@/lib/paystack-subscription'
 
 export async function POST(request: Request) {
     try {
@@ -14,8 +13,7 @@ export async function POST(request: Request) {
         const result = await response.json()
         const payment = result.data
         if (!response.ok || !result.status || payment?.status !== 'success') return NextResponse.json({ error: payment?.gateway_response || result.message || 'Payment was not successful.' }, { status: 400 })
-        if (planAmounts[planName] !== payment.amount || payment.currency !== 'NGN') return NextResponse.json({ error: 'Payment amount or currency does not match the selected plan.' }, { status: 400 })
-        if (payment.metadata?.companyId !== companyId || payment.metadata?.planName !== planName) return NextResponse.json({ error: 'Payment metadata does not match this subscription.' }, { status: 400 })
+        if (!paymentMatchesPlan(payment, planName, companyId)) return NextResponse.json({ error: 'Payment amount, currency, or details do not match the selected plan.' }, { status: 400 })
 
         const { data: existingSubscription, error: existingSubscriptionError } = await supabaseAdmin
             .from('subscriptions')
@@ -50,15 +48,7 @@ export async function POST(request: Request) {
             .maybeSingle()
         if (currentSubscriptionError) return NextResponse.json({ error: currentSubscriptionError.message }, { status: 500 })
 
-        if (currentSubscription) {
-            const { error: replacementError } = await supabaseAdmin
-                .from('subscriptions')
-                .update({ status: getSubscriptionReplacementStatus(currentSubscription.status), updated_at: now })
-                .eq('id', currentSubscription.id)
-            if (replacementError) return NextResponse.json({ error: replacementError.message }, { status: 500 })
-        }
-
-        const { data: subscription, error: subscriptionError } = await supabaseAdmin.from('subscriptions').insert({
+        const activeSubscription = {
             company_id: companyId,
             plan_name: planName,
             status: 'active',
@@ -67,8 +57,42 @@ export async function POST(request: Request) {
             starts_at: now,
             paystack_reference: reference,
             updated_at: now,
-        }).select('id,plan_name,status,starts_at,amount,currency').single()
-        if (subscriptionError) return NextResponse.json({ error: subscriptionError.message }, { status: 500 })
+        }
+
+        if (currentSubscription) {
+            const { error: replacementError } = await supabaseAdmin
+                .from('subscriptions')
+                .update({ status: getSubscriptionReplacementStatus(currentSubscription.status), updated_at: now })
+                .eq('id', currentSubscription.id)
+            if (replacementError) {
+                const { data: replaced, error: replaceError } = await supabaseAdmin
+                    .from('subscriptions')
+                    .update(activeSubscription)
+                    .eq('id', currentSubscription.id)
+                    .select('id,plan_name,status,starts_at,amount,currency')
+                    .single()
+                if (replaceError || !replaced) return NextResponse.json({ error: replaceError?.message || replacementError.message }, { status: 500 })
+                await supabaseAdmin.from('subscription_payments').update({ subscription_id: replaced.id }).eq('id', storedPayment.id)
+                return NextResponse.json({ ok: true, subscription: replaced })
+            }
+        }
+
+        const { data: subscription, error: subscriptionError } = await supabaseAdmin.from('subscriptions').insert(activeSubscription).select('id,plan_name,status,starts_at,amount,currency').single()
+        if (subscriptionError) {
+            const duplicateCompany = /duplicate key|unique/i.test(subscriptionError.message || '')
+            if (duplicateCompany && currentSubscription) {
+                const { data: replaced, error: replaceError } = await supabaseAdmin
+                    .from('subscriptions')
+                    .update(activeSubscription)
+                    .eq('id', currentSubscription.id)
+                    .select('id,plan_name,status,starts_at,amount,currency')
+                    .single()
+                if (replaceError || !replaced) return NextResponse.json({ error: replaceError?.message || subscriptionError.message }, { status: 500 })
+                await supabaseAdmin.from('subscription_payments').update({ subscription_id: replaced.id }).eq('id', storedPayment.id)
+                return NextResponse.json({ ok: true, subscription: replaced })
+            }
+            return NextResponse.json({ error: subscriptionError.message }, { status: 500 })
+        }
 
         await supabaseAdmin.from('subscription_payments').update({ subscription_id: subscription.id }).eq('id', storedPayment.id)
         return NextResponse.json({ ok: true, subscription })

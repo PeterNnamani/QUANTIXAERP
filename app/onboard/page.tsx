@@ -90,6 +90,7 @@ function OnboardForm() {
       const databaseUser = {
         id: raw.id,
         companyId: raw.company_id,
+        email: raw.email || undefined,
         name: raw.full_name,
         role: raw.role,
         roleId: raw.role,

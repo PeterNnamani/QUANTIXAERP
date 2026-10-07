@@ -8,7 +8,12 @@ import { normalizePlanName } from '@/lib/licensing'
 declare global {
     interface Window {
         PaystackPop?: new () => {
-            resumeTransaction: (accessCode: string, options: { onSuccess: () => Promise<void>; onCancel: () => void; onError: (error: unknown) => void }) => void
+            resumeTransaction: (accessCode: string, options: {
+                onSuccess: (transaction?: { reference?: string }) => Promise<void>
+                onCancel: () => void
+                onError: (error: unknown) => void
+                onLoad?: () => void
+            }) => void
         }
     }
 }
@@ -55,18 +60,30 @@ function loadPaystack(): Promise<void> {
     if (paystackLoadPromise) return paystackLoadPromise
 
     paystackLoadPromise = new Promise((resolve, reject) => {
+        const fail = () => {
+            paystackLoadPromise = null
+            reject(new Error('Unable to load the Paystack payment window.'))
+        }
+        const finish = () => {
+            if (window.PaystackPop) resolve()
+            else fail()
+        }
         const existingScript = document.querySelector<HTMLScriptElement>(`script[src="${paystackScript}"]`)
         if (existingScript) {
-            existingScript.addEventListener('load', () => resolve(), { once: true })
-            existingScript.addEventListener('error', () => reject(new Error('Unable to load the Paystack payment window.')), { once: true })
+            if (existingScript.dataset.loaded === 'true') {
+                finish()
+                return
+            }
+            existingScript.addEventListener('load', () => { existingScript.dataset.loaded = 'true'; finish() }, { once: true })
+            existingScript.addEventListener('error', fail, { once: true })
             return
         }
 
         const script = document.createElement('script')
         script.src = paystackScript
         script.async = true
-        script.onload = () => resolve()
-        script.onerror = () => reject(new Error('Unable to load the Paystack payment window.'))
+        script.onload = () => { script.dataset.loaded = 'true'; finish() }
+        script.onerror = fail
         document.body.appendChild(script)
     })
 
@@ -156,13 +173,13 @@ export default function SubscriptionAndLicensingPage() {
 
     const purchasePlan = async (plan: PlanCard) => {
         if (!user?.companyId) return setMessage('Your company profile is not available. Please sign in again.')
-        if (!user.email || !user.email.includes('@')) return setMessage('Add a valid email address to your staff profile before purchasing a subscription.')
         setLoadingPlan(plan.name)
         setMessage('')
         try {
-            const email = user.email
             const response = await fetch('/api/payments/paystack/initialize', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ planName: plan.name, companyId: user.companyId, email }),
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ planName: plan.name, companyId: user.companyId, email: user.email, staffId: user.staffId, username: user.username }),
             })
             const result = await response.json()
             if (!response.ok) throw new Error(result.error || 'Unable to start payment.')
@@ -177,10 +194,11 @@ export default function SubscriptionAndLicensingPage() {
                     setLoadingPlan(null)
                     setMessage(error instanceof Error ? error.message : 'Unable to open the payment window.')
                 },
-                onSuccess: async () => {
+                onSuccess: async (transaction) => {
                     try {
+                        const reference = transaction?.reference || result.reference
                         const verifyResponse = await fetch('/api/payments/paystack/verify', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reference: result.reference, companyId: user.companyId, planName: plan.name }),
+                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reference, companyId: user.companyId, planName: plan.name }),
                         })
                         const verification = await verifyResponse.json()
                         if (!verifyResponse.ok) throw new Error(verification.error || 'Payment verification failed.')
@@ -267,7 +285,7 @@ export default function SubscriptionAndLicensingPage() {
                                     <strong>{formatAmount(plan.supportFee)} / month</strong>
                                 </div>
                             )}
-                            <button type="button" className={activeSubscription?.planName === plan.name && activeSubscription.status === 'active' ? 'btn plan-button active-plan-button' : 'btn btn-primary plan-button'} onClick={() => purchasePlan(plan)} disabled={loadingPlan !== null || (activeSubscription?.planName === plan.name && activeSubscription.status === 'active')}>
+                            <button type="button" className={activeSubscription?.planName === plan.name && activeSubscription.status === 'active' ? 'btn plan-button active-plan-button allow-readonly' : 'btn btn-primary plan-button allow-readonly'} onClick={() => purchasePlan(plan)} disabled={loadingPlan !== null || (activeSubscription?.planName === plan.name && activeSubscription.status === 'active')}>
                                 {loadingPlan === plan.name ? 'Opening payment...' : activeSubscription?.planName === plan.name && activeSubscription.status === 'active' ? <><span className="plan-active-dot" />Active</> : 'Purchase'}
                             </button>
                         </div>

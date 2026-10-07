@@ -1922,6 +1922,10 @@ html[data-theme='dark'] .topbar {
   filter: none !important;
 }
 
+.app.role-readonly .main-area button.plan-button.allow-readonly {
+  display: inline-flex !important;
+}
+
 /* Staff may edit their own preferences and PIN even when company settings are read-only. */
 .app.role-readonly .main-area .settings-security-stack input,
 .app.role-readonly .main-area .settings-security-stack select,
