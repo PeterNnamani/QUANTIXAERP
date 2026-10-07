@@ -11065,6 +11065,16 @@ html[data-theme='dark'] .donut-center {
   grid-column: 1 / -1;
 }
 
+.field-error {
+  padding: 10px 12px;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .field-optional {
   color: var(--text3);
   font-weight: 400;

@@ -28,6 +28,23 @@ async function upsertSaleWithSchemaFallback(saleRow: Record<string, unknown>) {
   return { data: null, error: new Error('Sale could not match the database schema.') }
 }
 
+async function upsertExpensesWithSchemaFallback(expenseRows: Record<string, unknown>[]) {
+  if (!supabase || expenseRows.length === 0) return { error: null }
+  let compatibleRows = expenseRows.map((row) => ({ ...row }))
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const result = await supabase.from('expenses').upsert(compatibleRows, { onConflict: 'reference' })
+    if (!result.error) return result
+    const unsupportedColumn = compatibleRows.reduce<string | null>((column, row) => column || missingSchemaColumn(result.error, row), null)
+    if (!unsupportedColumn) return result
+    compatibleRows = compatibleRows.map((row) => {
+      const next = { ...row }
+      delete next[unsupportedColumn]
+      return next
+    })
+  }
+  return { error: new Error('Expenses could not match the database schema.') }
+}
+
 function enrichStoredUser(raw: any) {
   if (!raw || typeof raw !== 'object') return raw
   let roleId = typeof raw.role === 'string' ? raw.role.toLowerCase().replace(/\s+/g, '-') : raw.role
@@ -1286,23 +1303,28 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
           }
 
           if (normalizedUpdates.expenses) {
+            const previousExpenses = new Map((prev.expenses || []).map((expense) => [expense.id, expense]))
+            const expensesToPersist = (normalizedUpdates.expenses as Expense[]).filter((expense) => {
+              const previous = previousExpenses.get(expense.id)
+              return !previous || JSON.stringify(previous) !== JSON.stringify(expense)
+            })
             const { data: accounts } = await supabase.from('bank_accounts').select('id,name').eq('company_id', companyId)
             const accountIds: Record<string, string> = {}
               ; (accounts || []).forEach((account: any) => { accountIds[account.name] = account.id })
-            const expenseRows = (normalizedUpdates.expenses as Expense[]).map((expense) => ({
+            const expenseRows = expensesToPersist.map((expense) => ({
               company_id: companyId,
-              reference: businessReference(expense),
+              reference: businessReference(expense) || expense.id,
               expense_date: expense.date,
-              description: expense.desc,
-              category: expense.category,
+              description: expense.desc || expense.id,
+              category: expense.category || 'General',
               amount: expense.amount,
               bank_account_id: accountIds[expense.bank] || null,
               status: expense.status,
               notes: expense.notes || null,
               deleted_at: (expense as any).deletedAt || null,
               purge_after: (expense as any).purgeAfter || null,
-            }))
-            const { error: expensesPersistErr } = await supabase.from('expenses').upsert(expenseRows, { onConflict: 'reference' })
+            })).filter((row) => row.reference && row.expense_date && Number(row.amount) > 0)
+            const { error: expensesPersistErr } = await upsertExpensesWithSchemaFallback(expenseRows)
             if (expensesPersistErr) throw expensesPersistErr
             const expenseReferences = expenseRows.map((row) => row.reference).filter(Boolean)
             const postedKeys = new Set<string>()
@@ -1316,7 +1338,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
                 if (row.reference) postedKeys.add(row.reference)
               }
             }
-            for (const expense of normalizedUpdates.expenses as Expense[]) {
+            for (const expense of expensesToPersist) {
               if (!shouldPostExpenseCash(expense, postedKeys)) continue
               const reference = businessReference(expense)
               const { error: postingError } = await supabase.rpc('post_accounting_cash_movement', {

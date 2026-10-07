@@ -5,7 +5,7 @@ import { ArrowDownToLine, Check, CircleDollarSign, FileText, Filter, MoreHorizon
 import AppLayout from '@/components/layout/app-layout'
 import BulkImport from '@/components/bulk-import'
 import { Expense, useAccounting } from '@/lib/context'
-import { EXP_CATS as DEFAULT_EXP_CATS, formatCurrency, getCurrentDate, makeID } from '@/lib/utils'
+import { EXP_CATS as DEFAULT_EXP_CATS, formatCurrency, getCurrentDate, makeID, triggerAppToast } from '@/lib/utils'
 import { canEditPermission } from '@/lib/rbac'
 import { getSupabaseClient } from '@/lib/supabase.browser'
 import { downloadExcel } from '@/lib/export-utils'
@@ -41,16 +41,30 @@ export default function ExpensesPage() {
     const [receiptName, setReceiptName] = useState('')
     const [newCategory, setNewCategory] = useState('')
     const [approvalMessage, setApprovalMessage] = useState('')
-    const [fundsError, setFundsError] = useState('')
+    const [formError, setFormError] = useState('')
+    const [saving, setSaving] = useState(false)
     const receiptInput = useRef<HTMLInputElement>(null)
     const EXP_CATS = useMemo(() => Array.from(new Set([...DEFAULT_EXP_CATS, ...(state.expenseCategories || [])])), [state.expenseCategories])
     const [formData, setFormData] = useState({ date: getCurrentDate(), desc: '', category: '', amount: 0, tax: 0, bank: Object.keys(state.banks)[0] || 'Globus Bank', vendor: '', department: 'Operations', method: 'Bank Transfer', notes: '', project: '', reference: '', status: 'Pending Approval' as ExpenseStatus })
+
+    const paymentAccounts = useMemo(() => {
+        const configured = state.bankAccounts.map((account) => account.name).filter(Boolean)
+        return configured.length > 0 ? Array.from(new Set(configured)) : Object.keys(state.banks)
+    }, [state.bankAccounts, state.banks])
 
     const selectedAccountBalance = useMemo(() => {
         const match = state.bankAccounts.find((account) => account.name === formData.bank)
         const fallbackBalance = state.banks[formData.bank] ?? 0
         return Number(match?.balance ?? fallbackBalance)
     }, [formData.bank, state.bankAccounts, state.banks])
+
+    useEffect(() => {
+        if (!showForm) return
+        setFormData((prev) => {
+            const nextBank = paymentAccounts.includes(prev.bank) ? prev.bank : (paymentAccounts[0] || prev.bank)
+            return nextBank === prev.bank ? prev : { ...prev, bank: nextBank }
+        })
+    }, [showForm, paymentAccounts])
 
     const expenseCategories = useMemo(() => Array.from(new Set([...EXP_CATS, ...(state.expenseCategories || [])])), [state.expenseCategories])
     const expenses = useMemo(() => state.expenses.filter((expense) => expense.status !== 'VOID'), [state.expenses])
@@ -106,46 +120,98 @@ export default function ExpensesPage() {
     }, [expenses])
     const maxMonthlyExpense = Math.max(...monthlyExpenses.map((month) => month.amount), 1)
 
-    const saveExpense = () => {
-        if (!formData.desc || formData.amount <= 0 || !formData.category) return
-        const selectedBalance = Number(selectedAccountBalance || 0)
-        if (selectedBalance < formData.amount) {
-            setFundsError(`Insufficient funds in ${formData.bank}. Available: ${formatCurrency(selectedBalance)}. Needed: ${formatCurrency(formData.amount)}.`)
+    const saveExpense = async () => {
+        const description = formData.desc.trim()
+        if (!description || formData.amount <= 0 || !formData.category) {
+            setFormError('Enter a description, category, and amount greater than zero before saving.')
             return
         }
 
-        setFundsError('')
-        const expense: Expense = { id: makeID('EXP'), date: formData.date, desc: formData.desc, category: formData.category, amount: formData.amount, bank: formData.bank, status: formData.status, enteredBy: user?.name || 'System', notes: [`Vendor: ${formData.vendor || 'Unassigned'}`, `Department: ${formData.department}`, `Payment: ${formData.method}`, `Tax: ${formData.tax}`, formData.project ? `Project: ${formData.project}` : '', formData.reference ? `Reference: ${formData.reference}` : '', formData.notes, receiptName ? `Receipt: ${receiptName}` : ''].filter(Boolean).join(' | ') }
-        const updatedBanks = { ...state.banks }
-        const updatedBankAccounts = state.bankAccounts.map((account) => {
-            if (account.name !== expense.bank) return account
-            const balance = Number(account.balance ?? 0) - expense.amount
-            updatedBanks[account.name] = balance
-            return { ...account, balance }
-        })
-        if (updatedBankAccounts.every((account) => account.name !== expense.bank) && expense.bank) {
-            const nextBalance = Number(updatedBanks[expense.bank] ?? 0) - expense.amount
-            updatedBanks[expense.bank] = nextBalance
+        const isPaid = formData.status === 'Paid'
+        const selectedBalance = Number(selectedAccountBalance || 0)
+        if (isPaid && selectedBalance < formData.amount) {
+            setFormError(`Insufficient funds in ${formData.bank || 'the selected account'}. Available: ${formatCurrency(selectedBalance)}. Needed: ${formatCurrency(formData.amount)}.`)
+            return
         }
-        const paymentTxn = [{
-            id: `TXN-${expense.id}`,
-            date: expense.date,
-            name: expense.desc,
-            activity: `Payment made for ${expense.id}`,
-            method: formData.method,
-            amount: -expense.amount,
-            status: 'Completed',
-            description: expense.desc,
-            attachments: 0,
-            type: 'Withdrawal',
-            bank: expense.bank,
-        }]
-        updateState({ expenses: [expense, ...state.expenses], banks: updatedBanks, bankAccounts: updatedBankAccounts, bankTxns: [...paymentTxn, ...state.bankTxns] })
-        addAuditLog('CREATE', 'EXPENSE', expense.id, `${expense.category} expense recorded: ${formatCurrency(expense.amount)}`)
-        setSelectedId(expense.id)
-        setShowForm(false)
-        setReceiptName('')
-        setFormData({ ...formData, date: getCurrentDate(), desc: '', amount: 0, tax: 0, vendor: '', project: '', reference: '', notes: '' })
+
+        if (!user?.companyId) {
+            setFormError('Expense could not be saved because the company database is unavailable.')
+            return
+        }
+
+        const expenseId = makeID('EXP')
+        const expense: Expense = {
+            id: expenseId,
+            date: formData.date,
+            desc: description,
+            category: formData.category,
+            amount: formData.amount,
+            bank: formData.bank,
+            status: formData.status,
+            enteredBy: user?.name || 'System',
+            notes: [`Vendor: ${formData.vendor || 'Unassigned'}`, `Department: ${formData.department}`, `Payment: ${formData.method}`, `Tax: ${formData.tax}`, formData.project ? `Project: ${formData.project}` : '', formData.reference ? `Reference: ${formData.reference}` : '', formData.notes, receiptName ? `Receipt: ${receiptName}` : ''].filter(Boolean).join(' | '),
+        }
+
+        setSaving(true)
+        setFormError('')
+        try {
+            const response = await fetch('/api/expenses', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ companyId: user.companyId, expense }),
+            })
+            const result = await response.json().catch(() => ({ success: false, error: 'Expense could not be saved.' }))
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || 'Expense could not be saved. Please try again.')
+            }
+
+            const updatedBanks = { ...state.banks }
+            const updatedBankAccounts = isPaid
+                ? state.bankAccounts.map((account) => {
+                    if (account.name !== expense.bank) return account
+                    const balance = Number(account.balance ?? 0) - expense.amount
+                    updatedBanks[account.name] = balance
+                    return { ...account, balance }
+                })
+                : state.bankAccounts
+            if (isPaid && updatedBankAccounts.every((account) => account.name !== expense.bank) && expense.bank) {
+                updatedBanks[expense.bank] = Number(updatedBanks[expense.bank] ?? 0) - expense.amount
+            }
+            const paymentTxn = isPaid ? [{
+                id: `TXN-${expense.id}`,
+                date: expense.date,
+                name: expense.desc,
+                activity: `Payment made for ${expense.id}`,
+                method: formData.method,
+                amount: -expense.amount,
+                status: 'Completed',
+                description: expense.desc,
+                attachments: 0,
+                type: 'Withdrawal',
+                bank: expense.bank,
+            }] : []
+
+            updateState({
+                expenses: [expense, ...state.expenses],
+                ...(isPaid ? { banks: updatedBanks, bankAccounts: updatedBankAccounts, bankTxns: [...paymentTxn, ...state.bankTxns] } : {}),
+            })
+            addAuditLog('CREATE', 'EXPENSE', expense.id, `${expense.category} expense recorded: ${formatCurrency(expense.amount)}`)
+            triggerAppToast('Expense saved', `${expense.id} was saved to the register.`)
+            setSelectedId(expense.id)
+            setShowForm(false)
+            setReceiptName('')
+            setFormData({ ...formData, date: getCurrentDate(), desc: '', amount: 0, tax: 0, vendor: '', project: '', reference: '', notes: '' })
+        } catch (error) {
+            const fallback = 'Expense could not be saved. Please try again.'
+            const message = error instanceof Error
+                ? error.message
+                : typeof error === 'object' && error && 'message' in error
+                    ? String((error as { message?: string }).message || fallback)
+                    : fallback
+            setFormError(message)
+        } finally {
+            setSaving(false)
+        }
     }
 
     const addCategory = () => {
@@ -286,7 +352,7 @@ export default function ExpensesPage() {
                     <section className="expense-analytics-grid"><div className="chart-card"><div className="card-hd"><div><div className="chart-card-title">Monthly expenses</div><div className="section-subtitle">Actual spend for the last eight months</div></div><CircleDollarSign size={18} className="muted-cell" /></div><div className="bar-chart">{monthlyExpenses.map((month) => <div className="bar-column" key={month.key} title={`${month.label} ${formatCurrency(month.amount)}`}><strong className="bar-amount">{formatCurrency(month.amount)}</strong><div className="bar-value" style={{ height: `${month.amount ? Math.max(10, (month.amount / maxMonthlyExpense) * 100) : 4}%` }} /><span>{month.label}</span></div>)}</div></div><div className="chart-card"><div className="chart-card-title">Expenses by category</div><div className="category-bars">{categoryTotals.slice(0, 5).map((item) => <div className="category-bar" key={item.name}><div><span>{item.name}</span><strong>{formatCurrency(item.amount)}</strong></div><i style={{ width: `${(item.amount / maxCategory) * 100}%` }} /></div>)}{categoryTotals.length === 0 && <div className="empty-state">Category insights appear as expenses are recorded.</div>}</div></div></section>
                 </>}
                 {activeTab !== 'Expenses' && <section className="card empty-module-state"><div className="empty-module-icon"><CircleDollarSign size={24} /></div><h2>{activeTab}</h2><p>This workspace is ready for {activeTab.toLowerCase()} records and approvals.</p><button className="btn btn-primary" onClick={() => setShowForm(true)}><Plus size={16} /> Add record</button></section>}
-                {showForm && <div className="expense-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowForm(false)}><section className="expense-modal"><div className="card-hd"><div><div className="card-title">Add expense</div><div className="section-subtitle">Create an auditable expense record and route it for approval.</div></div><button className="icon-button" onClick={() => setShowForm(false)} aria-label="Close"><X size={18} /></button></div><div className="expense-form-grid"><label>Expense date<input type="date" value={formData.date} onChange={(event) => setFormData({ ...formData, date: event.target.value })} /></label><label>Expense number<input value="Auto-generated" disabled /></label><label className="field-wide">Description<input value={formData.desc} onChange={(event) => setFormData({ ...formData, desc: event.target.value })} placeholder="e.g. Office internet subscription" /></label><label>Category<select value={formData.category} onChange={(event) => setFormData({ ...formData, category: event.target.value })}><option value="">Select category</option>{EXP_CATS.map((option) => <option key={option} value={option}>{option}</option>)}</select><span className="field-optional">Add another category</span><div className="category-add-row"><input value={newCategory} onChange={(event) => setNewCategory(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && addCategory()} placeholder="New category name" /><button type="button" className="btn btn-secondary" onClick={addCategory}>Add</button></div></label><label>Vendor / payee<input value={formData.vendor} onChange={(event) => setFormData({ ...formData, vendor: event.target.value })} placeholder="Vendor name" /></label><label>Amount<input type="number" min="0" value={formData.amount || ''} onChange={(event) => { setFormData({ ...formData, amount: Number(event.target.value) }); setFundsError('') }} placeholder="0" /></label><label>Tax / VAT<input type="number" min="0" value={formData.tax || ''} onChange={(event) => setFormData({ ...formData, tax: Number(event.target.value) })} placeholder="0" /></label><label>Payment account<select value={formData.bank} onChange={(event) => { setFormData({ ...formData, bank: event.target.value }); setFundsError('') }}>{Object.keys(state.banks).map((bank) => <option key={bank}>{bank}</option>)}</select></label><label>Department<select value={formData.department} onChange={(event) => setFormData({ ...formData, department: event.target.value })}>{departments.slice(1).map((option) => <option key={option}>{option}</option>)}</select></label><label>Payment method<select value={formData.method} onChange={(event) => setFormData({ ...formData, method: event.target.value })}>{paymentMethods.map((option) => <option key={option}>{option}</option>)}</select></label><label>Payment status<select value={formData.status} onChange={(event) => setFormData({ ...formData, status: event.target.value as ExpenseStatus })}>{statusOptions.slice(1).map((option) => <option key={option}>{option}</option>)}</select></label><label>Project <span className="field-optional">Optional</span><input value={formData.project} onChange={(event) => setFormData({ ...formData, project: event.target.value })} placeholder="Project code" /></label><label>Reference / transaction ID<span className="field-optional">Optional</span><input value={formData.reference} onChange={(event) => setFormData({ ...formData, reference: event.target.value })} placeholder="e.g. TXN-1024" /></label><label className="field-wide">Notes<span className="field-optional">Optional</span><textarea value={formData.notes} onChange={(event) => setFormData({ ...formData, notes: event.target.value })} placeholder="Add context for reviewers" /></label>{fundsError && <div className="field-wide field-error" role="alert">{fundsError}</div>}<div className="field-wide"><button className="receipt-upload" onClick={() => receiptInput.current?.click()}><Paperclip size={16} /> {receiptName || 'Upload receipt or invoice'}<Upload size={15} /></button><input ref={receiptInput} type="file" accept=".pdf,.jpg,.jpeg,.png,.heic" hidden onChange={(event) => setReceiptName(event.target.files?.[0]?.name || '')} /></div></div><div className="btn-group"><button className="btn btn-secondary" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-primary" onClick={saveExpense}>Save expense</button></div></section></div>}
+                {showForm && <div className="expense-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowForm(false)}><section className="expense-modal"><div className="card-hd"><div><div className="card-title">Add expense</div><div className="section-subtitle">Create an auditable expense record and route it for approval.</div></div><button className="icon-button" onClick={() => setShowForm(false)} aria-label="Close"><X size={18} /></button></div><div className="expense-form-grid"><label>Expense date<input type="date" value={formData.date} onChange={(event) => setFormData({ ...formData, date: event.target.value })} /></label><label>Expense number<input value="Auto-generated" disabled /></label><label className="field-wide">Description<input value={formData.desc} onChange={(event) => setFormData({ ...formData, desc: event.target.value })} placeholder="e.g. Office internet subscription" /></label><label>Category<select value={formData.category} onChange={(event) => setFormData({ ...formData, category: event.target.value })}><option value="">Select category</option>{EXP_CATS.map((option) => <option key={option} value={option}>{option}</option>)}</select><span className="field-optional">Add another category</span><div className="category-add-row"><input value={newCategory} onChange={(event) => setNewCategory(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && addCategory()} placeholder="New category name" /><button type="button" className="btn btn-secondary" onClick={addCategory}>Add</button></div></label><label>Vendor / payee<input value={formData.vendor} onChange={(event) => setFormData({ ...formData, vendor: event.target.value })} placeholder="Vendor name" /></label><label>Amount<input type="number" min="0" value={formData.amount || ''} onChange={(event) => { setFormData({ ...formData, amount: Number(event.target.value) }); setFormError('') }} placeholder="0" /></label><label>Tax / VAT<input type="number" min="0" value={formData.tax || ''} onChange={(event) => setFormData({ ...formData, tax: Number(event.target.value) })} placeholder="0" /></label><label>Payment account<select value={formData.bank} onChange={(event) => { setFormData({ ...formData, bank: event.target.value }); setFormError('') }}>{paymentAccounts.map((bank) => <option key={bank} value={bank}>{bank}</option>)}</select></label><label>Department<select value={formData.department} onChange={(event) => setFormData({ ...formData, department: event.target.value })}>{departments.slice(1).map((option) => <option key={option}>{option}</option>)}</select></label><label>Payment method<select value={formData.method} onChange={(event) => setFormData({ ...formData, method: event.target.value })}>{paymentMethods.map((option) => <option key={option}>{option}</option>)}</select></label><label>Payment status<select value={formData.status} onChange={(event) => setFormData({ ...formData, status: event.target.value as ExpenseStatus })}>{statusOptions.slice(1).map((option) => <option key={option}>{option}</option>)}</select></label><label>Project <span className="field-optional">Optional</span><input value={formData.project} onChange={(event) => setFormData({ ...formData, project: event.target.value })} placeholder="Project code" /></label><label>Reference / transaction ID<span className="field-optional">Optional</span><input value={formData.reference} onChange={(event) => setFormData({ ...formData, reference: event.target.value })} placeholder="e.g. TXN-1024" /></label><label className="field-wide">Notes<span className="field-optional">Optional</span><textarea value={formData.notes} onChange={(event) => setFormData({ ...formData, notes: event.target.value })} placeholder="Add context for reviewers" /></label>{formError && <div className="field-wide field-error" role="alert">{formError}</div>}<div className="field-wide"><button className="receipt-upload" onClick={() => receiptInput.current?.click()}><Paperclip size={16} /> {receiptName || 'Upload receipt or invoice'}<Upload size={15} /></button><input ref={receiptInput} type="file" accept=".pdf,.jpg,.jpeg,.png,.heic" hidden onChange={(event) => setReceiptName(event.target.files?.[0]?.name || '')} /></div></div><div className="btn-group"><button className="btn btn-secondary" type="button" disabled={saving} onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-primary" type="button" disabled={saving} onClick={() => { void saveExpense() }}>{saving ? 'Saving…' : 'Save expense'}</button></div></section></div>}
             </div>
         </AppLayout>
     )
