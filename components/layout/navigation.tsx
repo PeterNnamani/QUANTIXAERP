@@ -26,6 +26,14 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M2 10h20" />
     </svg>
   ),
+  costOfSales: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7h16" />
+      <path d="M6 7v10h12V7" />
+      <path d="M9 11h6" />
+      <path d="M9 14h4" />
+    </svg>
+  ),
   expenses: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M6 7h12" />
@@ -215,6 +223,7 @@ const NAV_GROUPS = {
   ],
   TRANSACTIONS: [
     { label: 'Sales', href: '/sales', icon: 'sales', roles: ['md', 'accountant', 'cashier'] },
+    { label: 'Cost of Sales', href: '/cost-of-sales', icon: 'costOfSales', roles: ['md', 'accountant'] },
     { label: 'Expenses', href: '/expenses', icon: 'expenses', roles: ['md', 'accountant'] },
   ],
   BANKING: [

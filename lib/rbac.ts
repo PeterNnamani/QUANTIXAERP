@@ -1,6 +1,7 @@
 export type PermissionKey =
     | 'dashboard'
     | 'sales'
+    | 'costOfSales'
     | 'receivables'
     | 'inventory'
     | 'productManager'
@@ -106,7 +107,7 @@ const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
 }
 
 const OWNER_OPERATIONAL_PERMISSIONS: PermissionKey[] = [
-    'sales', 'receivables', 'inventory', 'productManager', 'expenses', 'customers', 'suppliers',
+    'sales', 'costOfSales', 'receivables', 'inventory', 'productManager', 'expenses', 'customers', 'suppliers',
     'supplierBalances', 'accounting', 'bankTxn', 'banks', 'dailyClose', 'ledger', 'payables', 'prepayments',
     'supplierRebates', 'loans', 'tax', 'reports', 'monthlyReport', 'annualReport', 'assetSchedule',
 ]
@@ -350,7 +351,7 @@ export function canEditPermission(
 }
 
 const ROUTE_PERMISSIONS: Record<string, PermissionKey> = {
-    '/dashboard': 'dashboard', '/sales': 'sales', '/inventory': 'inventory',
+    '/dashboard': 'dashboard', '/sales': 'sales', '/cost-of-sales': 'costOfSales', '/inventory': 'inventory',
     '/customers': 'customers', '/suppliers': 'suppliers', '/expenses': 'expenses', '/ledger': 'ledger', '/daily-close': 'dailyClose',
     '/receivables': 'receivables', '/payables': 'payables', '/supplier-balances': 'supplierBalances', '/prepayments': 'prepayments', '/supplier-rebates': 'supplierRebates',
     '/loans': 'loans', '/reports': 'reports', '/monthly-report': 'monthlyReport', '/annual-report': 'annualReport',
@@ -400,6 +401,7 @@ export function getVisibleNavigationItems(user: Pick<UserWithRole, 'role' | 'per
     const allItems = [
         { label: 'Dashboard', href: '/dashboard', group: 'OVERVIEW', permission: 'dashboard' as PermissionKey, icon: 'dashboard' },
         { label: 'Sales', href: '/sales', group: 'TRANSACTIONS', permission: 'sales' as PermissionKey, icon: 'sales' },
+        { label: 'Cost of Sales', href: '/cost-of-sales', group: 'TRANSACTIONS', permission: 'costOfSales' as PermissionKey, icon: 'costOfSales' },
         { label: 'Expenses', href: '/expenses', group: 'TRANSACTIONS', permission: 'expenses' as PermissionKey, icon: 'expenses' },
         { label: 'Customers', href: '/customers', group: 'DIRECTORY', permission: 'customers' as PermissionKey, icon: 'customers' },
         { label: 'Suppliers', href: '/suppliers', group: 'DIRECTORY', permission: 'suppliers' as PermissionKey, icon: 'suppliers' },

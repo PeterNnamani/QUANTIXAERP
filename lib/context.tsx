@@ -452,7 +452,7 @@ const STORAGE_KEY = 'hw_accounting_data'
 const AUTH_KEY = 'hw_auth_user'
 const ONBOARDING_COMPLETED_KEY = 'quantixa_onboarding_completed'
 const LOGIN_NOTIFICATION_KEY = 'quantixa_login_notification'
-const INACTIVITY_TIMEOUT_MS = 2 * 60 * 1000
+const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000
 const REMEMBER_USERNAME_KEY = 'hw_remembered_username'
 
 function persistAuthUser(user: User) {

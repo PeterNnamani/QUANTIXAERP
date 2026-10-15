@@ -17,6 +17,7 @@ const positionOptions = ['Sales Manager', 'Cashier', 'Store Officer', 'Accountan
 const permissionOptions: { key: PermissionKey; label: string }[] = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'sales', label: 'Sales' },
+  { key: 'costOfSales', label: 'Cost of Sales' },
   { key: 'inventory', label: 'Inventory' },
   { key: 'productManager', label: 'Product Manager' },
   { key: 'expenses', label: 'Expenses & Approval' },
