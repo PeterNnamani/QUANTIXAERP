@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase.server'
 import { normalizePlanName } from '@/lib/licensing'
-import { normalizeBillingEmail, planAmountKobo, PLAN_PRICES_NGN } from '@/lib/paystack-subscription'
+import { normalizeBillingEmail, paystackCallbackUrl, planAmountKobo, PLAN_PRICES_NGN } from '@/lib/paystack-subscription'
 
 async function resolveBillingEmail(companyId: string, email: unknown, staffId: unknown, username: unknown) {
     const provided = normalizeBillingEmail(email)
@@ -41,6 +41,8 @@ export async function POST(request: Request) {
                 email: billingEmail,
                 amount,
                 currency: 'NGN',
+                callback_url: paystackCallbackUrl(request),
+                channels: ['bank_transfer', 'card', 'bank', 'ussd'],
                 metadata: {
                     companyId,
                     planName: plan,

@@ -444,6 +444,7 @@ export interface AccountingContextType {
   logout: () => void
   addAuditLog: (action: string, type: string, reference: string, details: string) => void
   activateSubscription: (subscription: Pick<User, 'subscriptionPlan' | 'subscriptionStatus' | 'trialEndsAt'>) => void
+  setPaymentInProgress: (inProgress: boolean) => void
 }
 
 const AccountingContext = createContext<AccountingContextType | undefined>(undefined)
@@ -800,6 +801,7 @@ function normalizeRemoteAuditLogs(data: any[]): AuditLog[] {
 export function AccountingProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [subscriptionLoaded, setSubscriptionLoaded] = useState(false)
+  const [paymentInProgress, setPaymentInProgress] = useState(false)
   const [state, setState] = useState<AppState>(defaultState)
   const companySettingsWriteQueue = useRef(Promise.resolve())
   const trialExpiryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1712,7 +1714,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
-    if (!user) return
+    if (!user || paymentInProgress) return
 
     let timeoutId: ReturnType<typeof setTimeout>
     const resetInactivityTimer = () => {
@@ -1728,7 +1730,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       clearTimeout(timeoutId)
       activityEvents.forEach((eventName) => window.removeEventListener(eventName, resetInactivityTimer))
     }
-  }, [user])
+  }, [user, paymentInProgress])
 
   const resetCompanyBooks = () => {
     remoteLoadToken.current += 1
@@ -1790,6 +1792,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     logout,
     addAuditLog,
     activateSubscription,
+    setPaymentInProgress,
   }
 
   return (

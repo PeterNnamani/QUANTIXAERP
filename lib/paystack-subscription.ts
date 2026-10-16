@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import { normalizePlanName } from './licensing.ts'
 
 export const PLAN_PRICES_NGN: Record<string, number> = {
@@ -40,6 +41,24 @@ export function readPaystackMetadata(metadata: unknown): { companyId?: string; p
         companyId: companyId == null || companyId === '' ? undefined : String(companyId),
         planName: planName == null || planName === '' ? undefined : String(planName),
     }
+}
+
+export function isValidPaystackSignature(rawBody: string, signature: string | null, secret: string) {
+    if (!signature || !secret) return false
+    const expected = createHmac('sha512', secret).update(rawBody).digest('hex')
+    const received = Buffer.from(signature)
+    const computed = Buffer.from(expected)
+    return received.length === computed.length && timingSafeEqual(received, computed)
+}
+
+export function paystackCallbackUrl(request: Request) {
+    const configured = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, '')
+    if (configured) return `${configured}/subscription-and-licensing`
+    const url = new URL(request.url)
+    const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim()
+    const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim()
+    const origin = forwardedHost ? `${forwardedProto || url.protocol.replace(':', '')}://${forwardedHost}` : url.origin
+    return `${origin}/subscription-and-licensing`
 }
 
 export function paymentMatchesPlan(payment: { amount?: unknown; currency?: unknown; metadata?: unknown } | null | undefined, planName: string, companyId: string) {

@@ -145,7 +145,7 @@ const plans: PlanCard[] = [
 ]
 
 export default function SubscriptionAndLicensingPage() {
-    const { user, activateSubscription } = useAccounting()
+    const { user, activateSubscription, setPaymentInProgress } = useAccounting()
     const [loadingPlan, setLoadingPlan] = useState<string | null>(null)
     const [activeSubscription, setActiveSubscription] = useState<ActiveSubscription | null>(null)
     const [intendedPlan, setIntendedPlan] = useState<string | null>(null)
@@ -154,7 +154,42 @@ export default function SubscriptionAndLicensingPage() {
     useEffect(() => {
         void loadPaystack().catch(() => setMessage('Unable to load the Paystack payment window.'))
         setIntendedPlan(normalizePlanName(new URLSearchParams(window.location.search).get('plan')))
-    }, [])
+        return () => setPaymentInProgress(false)
+    }, [setPaymentInProgress])
+
+    const confirmPayment = async (reference: string, planName?: string) => {
+        if (!user?.companyId) return
+        setPaymentInProgress(true)
+        setMessage('Confirming the payment with Paystack. Keep this page open.')
+        try {
+            const verifyResponse = await fetch('/api/payments/paystack/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reference, companyId: user.companyId, planName }),
+            })
+            const verification = await verifyResponse.json()
+            if (!verifyResponse.ok) throw new Error(verification.error || 'Payment verification failed.')
+            const confirmedPlan = normalizePlanName(verification.subscription.plan_name) || normalizePlanName(planName) || planName as 'Growth Edition' | 'Professional Edition' | 'Enterprise Edition'
+            setActiveSubscription({
+                planName: confirmedPlan,
+                status: verification.subscription.status,
+                startsAt: verification.subscription.starts_at,
+                nextPaymentDate: getNextPaymentDate(verification.subscription.starts_at).toISOString(),
+            })
+            activateSubscription({ subscriptionPlan: confirmedPlan, subscriptionStatus: 'active' })
+            setMessage(`${confirmedPlan} is active. Its features are open in the menu now.`)
+            const params = new URLSearchParams(window.location.search)
+            params.delete('reference')
+            params.delete('trxref')
+            const nextQuery = params.toString()
+            window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}`)
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : 'Payment verification failed.')
+        } finally {
+            setLoadingPlan(null)
+            setPaymentInProgress(false)
+        }
+    }
 
     useEffect(() => {
         if (user?.subscriptionStatus !== 'active') return
@@ -187,6 +222,9 @@ export default function SubscriptionAndLicensingPage() {
                 })
             })
             .catch(() => undefined)
+
+        const reference = new URLSearchParams(window.location.search).get('reference') || new URLSearchParams(window.location.search).get('trxref')
+        if (reference) void confirmPayment(reference)
     }, [user?.companyId])
 
     const purchasePlan = async (plan: PlanCard) => {
@@ -205,38 +243,33 @@ export default function SubscriptionAndLicensingPage() {
             if (!window.PaystackPop) throw new Error('Paystack payment window is unavailable.')
             if (!result.accessCode) throw new Error('Paystack did not return a payment access code.')
 
+            setPaymentInProgress(true)
+            setMessage('Keep this page open and pay the exact amount in the Paystack window. Leave that window open until Paystack confirms. Closing it leaves the payment abandoned and the bank reverses the money.')
             const paystack = new window.PaystackPop()
             paystack.resumeTransaction(result.accessCode, {
-                onCancel: () => { setLoadingPlan(null); setMessage('Payment window closed before completion.') },
+                onCancel: () => {
+                    setPaymentInProgress(false)
+                    setLoadingPlan(null)
+                    setMessage('Payment window closed before Paystack confirmed the money. Start again and pay the exact amount without closing this page.')
+                },
                 onError: (error) => {
+                    setPaymentInProgress(false)
                     setLoadingPlan(null)
                     setMessage(error instanceof Error ? error.message : 'Unable to open the payment window.')
                 },
                 onSuccess: async (transaction) => {
-                    try {
-                        const reference = transaction?.reference || result.reference
-                        const verifyResponse = await fetch('/api/payments/paystack/verify', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reference, companyId: user.companyId, planName: plan.name }),
-                        })
-                        const verification = await verifyResponse.json()
-                        if (!verifyResponse.ok) throw new Error(verification.error || 'Payment verification failed.')
-                        const planName = normalizePlanName(verification.subscription.plan_name) || normalizePlanName(plan.name) || plan.name as 'Growth Edition' | 'Professional Edition' | 'Enterprise Edition'
-                        setActiveSubscription({
-                            planName,
-                            status: verification.subscription.status,
-                            startsAt: verification.subscription.starts_at,
-                            nextPaymentDate: getNextPaymentDate(verification.subscription.starts_at).toISOString(),
-                        })
-                        activateSubscription({ subscriptionPlan: planName, subscriptionStatus: 'active' })
-                        setMessage(`${planName} is active. Its features are open in the menu now.`)
-                    } catch (error) {
-                        setMessage(error instanceof Error ? error.message : 'Payment verification failed.')
-                    } finally {
+                    const reference = transaction?.reference || result.reference
+                    if (!reference) {
+                        setPaymentInProgress(false)
                         setLoadingPlan(null)
+                        setMessage('Paystack did not return a payment reference.')
+                        return
                     }
+                    await confirmPayment(reference, plan.name)
                 },
             })
         } catch (error) {
+            setPaymentInProgress(false)
             setLoadingPlan(null)
             setMessage(error instanceof Error ? error.message : 'Unable to complete payment.')
         }
@@ -252,7 +285,7 @@ export default function SubscriptionAndLicensingPage() {
                         <p className="pricing-copy">Choose the edition that matches your business today and your growth plans tomorrow. Every edition is backed by a one-time licence fee and a monthly support and maintenance subscription.</p>
                     </div>
                     <div className="hero-actions">
-                        <div className="pricing-note">All plans include support, maintenance, and access to core ERP capabilities.</div>
+                        <div className="pricing-note">Pay the exact amount by bank transfer and keep this page open until Paystack confirms. These licence amounts are too large for most cards, and a closed or expired checkout is marked abandoned so the bank reverses the money.</div>
                     </div>
                 </div>
 
