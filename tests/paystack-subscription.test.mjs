@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { isValidPaystackSignature, normalizeBillingEmail, paymentMatchesPlan, paystackCallbackUrl, planAmountKobo, readPaystackMetadata } from '../lib/paystack-subscription.ts'
+import { isPendingPaystackStatus, isValidPaystackSignature, normalizeBillingEmail, paymentMatchesPlan, paystackCallbackUrl, planAmountKobo, readPaystackMetadata } from '../lib/paystack-subscription.ts'
 
 test('licence prices are charged in kobo', () => {
     assert.equal(planAmountKobo('Growth Edition'), 45000000)
@@ -53,4 +53,12 @@ test('string and custom-field metadata still identify the subscription', () => {
     })
     assert.deepEqual(readPaystackMetadata(metadata), { companyId: 'co-9', planName: 'Enterprise Edition' })
     assert.equal(paymentMatchesPlan({ amount: 90000000, currency: 'NGN', metadata }, 'Enterprise Edition', 'co-9'), true)
+})
+
+test('bank transfer charges stay pending until Paystack confirms them', () => {
+    assert.equal(isPendingPaystackStatus('ongoing'), true)
+    assert.equal(isPendingPaystackStatus('pending_bank_transfer'), true)
+    assert.equal(isPendingPaystackStatus('pending'), true)
+    assert.equal(isPendingPaystackStatus('abandoned'), false)
+    assert.equal(isPendingPaystackStatus('success'), false)
 })

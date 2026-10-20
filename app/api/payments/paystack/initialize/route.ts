@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase.server'
 import { normalizePlanName } from '@/lib/licensing'
-import { normalizeBillingEmail, paystackCallbackUrl, planAmountKobo, PLAN_PRICES_NGN } from '@/lib/paystack-subscription'
+import { ensurePaystackPaymentSessionTimeout, normalizeBillingEmail, paystackCallbackUrl, planAmountKobo, PLAN_PRICES_NGN } from '@/lib/paystack-subscription'
 
 async function resolveBillingEmail(companyId: string, email: unknown, staffId: unknown, username: unknown) {
     const provided = normalizeBillingEmail(email)
@@ -34,6 +34,10 @@ export async function POST(request: Request) {
         const billingEmail = await resolveBillingEmail(String(companyId), email, staffId, username)
         if (!billingEmail) return NextResponse.json({ error: 'Add a valid email address to your staff profile before purchasing a subscription.' }, { status: 400 })
 
+        // Licence checkouts are usually bank transfer. Paystack's default session timeout (~30s)
+        // abandons those charges before the transfer can clear.
+        await ensurePaystackPaymentSessionTimeout(process.env.PAYSTACK_SECRET_KEY)
+
         const response = await fetch('https://api.paystack.co/transaction/initialize', {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
@@ -56,7 +60,12 @@ export async function POST(request: Request) {
         const result = await response.json()
         if (!response.ok || !result.status || !result.data?.reference) return NextResponse.json({ error: result.message || 'Unable to initialize payment.' }, { status: 502 })
 
-        return NextResponse.json({ publicKey: process.env.NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY, accessCode: result.data.access_code, reference: result.data.reference })
+        return NextResponse.json({
+            publicKey: process.env.NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY,
+            accessCode: result.data.access_code,
+            reference: result.data.reference,
+            authorizationUrl: result.data.authorization_url,
+        })
     } catch (error) {
         return NextResponse.json({ error: error instanceof Error ? error.message : 'Unable to initialize payment.' }, { status: 500 })
     }

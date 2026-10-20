@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabase.server'
 import { getSubscriptionReplacementStatus, normalizePlanName, type PlanName } from '@/lib/licensing'
-import { paymentMatchesPlan, readPaystackMetadata } from '@/lib/paystack-subscription'
+import { isPendingPaystackStatus, paymentMatchesPlan, readPaystackMetadata } from '@/lib/paystack-subscription'
 
 type PaystackCharge = {
     id?: unknown
@@ -26,11 +26,22 @@ export async function fulfillPaystackCharge(reference: string, expected?: { comp
     })
     const result = await response.json()
     const payment = result.data as PaystackCharge | undefined
-    if (!response.ok || !result.status || payment?.status !== 'success') {
-        const error = payment?.status === 'abandoned'
-            ? 'Paystack did not receive this payment. The checkout expired before the money was confirmed, so the bank reversed it. Keep this page open and pay the exact amount by bank transfer.'
+    const paymentStatus = String(payment?.status || '').toLowerCase()
+    if (!response.ok || !result.status || paymentStatus !== 'success') {
+        if (isPendingPaystackStatus(paymentStatus)) {
+            return {
+                status: 202,
+                body: {
+                    pending: true,
+                    paymentStatus,
+                    error: 'Payment is still being confirmed by Paystack. Keep this page open.',
+                },
+            }
+        }
+        const error = paymentStatus === 'abandoned'
+            ? 'Paystack marked this checkout abandoned because the payment session expired before the transfer was confirmed. Start a new payment and complete the bank transfer before the checkout times out.'
             : payment?.gateway_response || result.message || 'Payment was not successful.'
-        return { status: 400, body: { error } }
+        return { status: 400, body: { error, paymentStatus: paymentStatus || undefined } }
     }
 
     const metadata = readPaystackMetadata(payment.metadata)

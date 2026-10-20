@@ -1,7 +1,7 @@
 'use client'
 
 import AppLayout from '@/components/layout/app-layout'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAccounting } from '@/lib/context'
 import { normalizePlanName, plansMatch } from '@/lib/licensing'
 
@@ -16,6 +16,37 @@ declare global {
             }) => void
         }
     }
+}
+
+const PENDING_PAYMENT_KEY = 'quantixa.pendingPaystackPayment'
+const VERIFY_POLL_MS = 4000
+const VERIFY_MAX_MS = 55 * 60 * 1000
+
+type PendingPayment = {
+    reference: string
+    planName?: string
+    companyId: string
+    startedAt: number
+}
+
+function readPendingPayment(): PendingPayment | null {
+    try {
+        const raw = sessionStorage.getItem(PENDING_PAYMENT_KEY)
+        if (!raw) return null
+        const parsed = JSON.parse(raw) as PendingPayment
+        if (!parsed?.reference || !parsed?.companyId) return null
+        return parsed
+    } catch {
+        return null
+    }
+}
+
+function writePendingPayment(payment: PendingPayment) {
+    sessionStorage.setItem(PENDING_PAYMENT_KEY, JSON.stringify(payment))
+}
+
+function clearPendingPayment() {
+    sessionStorage.removeItem(PENDING_PAYMENT_KEY)
 }
 
 type FeatureSection = {
@@ -150,44 +181,78 @@ export default function SubscriptionAndLicensingPage() {
     const [activeSubscription, setActiveSubscription] = useState<ActiveSubscription | null>(null)
     const [intendedPlan, setIntendedPlan] = useState<string | null>(null)
     const [message, setMessage] = useState('')
+    const watchGeneration = useRef(0)
 
     useEffect(() => {
         void loadPaystack().catch(() => setMessage('Unable to load the Paystack payment window.'))
         setIntendedPlan(normalizePlanName(new URLSearchParams(window.location.search).get('plan')))
-        return () => setPaymentInProgress(false)
-    }, [setPaymentInProgress])
+    }, [])
 
-    const confirmPayment = async (reference: string, planName?: string) => {
-        if (!user?.companyId) return
+    const applyConfirmedSubscription = (verification: { subscription: { plan_name?: string; status: string; starts_at: string } }, planName?: string) => {
+        const confirmedPlan = normalizePlanName(verification.subscription.plan_name) || normalizePlanName(planName) || planName as 'Growth Edition' | 'Professional Edition' | 'Enterprise Edition'
+        setActiveSubscription({
+            planName: confirmedPlan,
+            status: verification.subscription.status,
+            startsAt: verification.subscription.starts_at,
+            nextPaymentDate: getNextPaymentDate(verification.subscription.starts_at).toISOString(),
+        })
+        activateSubscription({ subscriptionPlan: confirmedPlan, subscriptionStatus: 'active' })
+        setMessage(`${confirmedPlan} is active. Its features are open in the menu now.`)
+        const params = new URLSearchParams(window.location.search)
+        params.delete('reference')
+        params.delete('trxref')
+        const nextQuery = params.toString()
+        window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}`)
+    }
+
+    const watchPayment = async (reference: string, planName?: string, options?: { fromCancel?: boolean }) => {
+        if (!user?.companyId || !reference) return
+        const generation = ++watchGeneration.current
+        const existing = readPendingPayment()
+        const startedAt = existing?.reference === reference ? existing.startedAt : Date.now()
+        writePendingPayment({ reference, planName, companyId: user.companyId, startedAt })
         setPaymentInProgress(true)
-        setMessage('Confirming the payment with Paystack. Keep this page open.')
+        setLoadingPlan((current) => planName || current)
+        setMessage(options?.fromCancel
+            ? 'Payment window closed. Still waiting for Paystack to confirm the bank transfer — do not start a new payment yet.'
+            : 'Confirming the payment with Paystack. Keep this page open while the bank transfer settles.')
+
         try {
-            const verifyResponse = await fetch('/api/payments/paystack/verify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ reference, companyId: user.companyId, planName }),
-            })
-            const verification = await verifyResponse.json()
-            if (!verifyResponse.ok) throw new Error(verification.error || 'Payment verification failed.')
-            const confirmedPlan = normalizePlanName(verification.subscription.plan_name) || normalizePlanName(planName) || planName as 'Growth Edition' | 'Professional Edition' | 'Enterprise Edition'
-            setActiveSubscription({
-                planName: confirmedPlan,
-                status: verification.subscription.status,
-                startsAt: verification.subscription.starts_at,
-                nextPaymentDate: getNextPaymentDate(verification.subscription.starts_at).toISOString(),
-            })
-            activateSubscription({ subscriptionPlan: confirmedPlan, subscriptionStatus: 'active' })
-            setMessage(`${confirmedPlan} is active. Its features are open in the menu now.`)
-            const params = new URLSearchParams(window.location.search)
-            params.delete('reference')
-            params.delete('trxref')
-            const nextQuery = params.toString()
-            window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}`)
+            while (watchGeneration.current === generation) {
+                const verifyResponse = await fetch('/api/payments/paystack/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reference, companyId: user.companyId, planName }),
+                })
+                const verification = await verifyResponse.json()
+                if (watchGeneration.current !== generation) return
+
+                if (verifyResponse.ok && verification.subscription) {
+                    clearPendingPayment()
+                    applyConfirmedSubscription(verification, planName)
+                    return
+                }
+
+                if (verifyResponse.status === 202 || verification.pending) {
+                    if (Date.now() - startedAt > VERIFY_MAX_MS) {
+                        throw new Error('Paystack is still waiting for the bank transfer. Start a new payment if the previous checkout expired.')
+                    }
+                    setMessage('Waiting for Paystack to confirm the bank transfer. Keep this page open and pay the exact amount.')
+                    await new Promise((resolve) => window.setTimeout(resolve, VERIFY_POLL_MS))
+                    continue
+                }
+
+                throw new Error(verification.error || 'Payment verification failed.')
+            }
         } catch (error) {
+            if (watchGeneration.current !== generation) return
+            clearPendingPayment()
             setMessage(error instanceof Error ? error.message : 'Payment verification failed.')
         } finally {
-            setLoadingPlan(null)
-            setPaymentInProgress(false)
+            if (watchGeneration.current === generation) {
+                setLoadingPlan(null)
+                setPaymentInProgress(false)
+            }
         }
     }
 
@@ -223,12 +288,22 @@ export default function SubscriptionAndLicensingPage() {
             })
             .catch(() => undefined)
 
-        const reference = new URLSearchParams(window.location.search).get('reference') || new URLSearchParams(window.location.search).get('trxref')
-        if (reference) void confirmPayment(reference)
+        const callbackReference = new URLSearchParams(window.location.search).get('reference') || new URLSearchParams(window.location.search).get('trxref')
+        const pending = readPendingPayment()
+        if (callbackReference) {
+            const planName = pending?.reference === callbackReference ? pending.planName : undefined
+            void watchPayment(callbackReference, planName)
+            return
+        }
+        if (pending && pending.companyId === user.companyId && Date.now() - pending.startedAt < VERIFY_MAX_MS) {
+            void watchPayment(pending.reference, pending.planName)
+        }
     }, [user?.companyId])
 
     const purchasePlan = async (plan: PlanCard) => {
         if (!user?.companyId) return setMessage('Your company profile is not available. Please sign in again.')
+        watchGeneration.current += 1
+        clearPendingPayment()
         setLoadingPlan(plan.name)
         setMessage('')
         try {
@@ -241,36 +316,36 @@ export default function SubscriptionAndLicensingPage() {
             if (!response.ok) throw new Error(result.error || 'Unable to start payment.')
             await loadPaystack()
             if (!window.PaystackPop) throw new Error('Paystack payment window is unavailable.')
-            if (!result.accessCode) throw new Error('Paystack did not return a payment access code.')
+            if (!result.accessCode || !result.reference) throw new Error('Paystack did not return a payment access code.')
 
+            writePendingPayment({ reference: result.reference, planName: plan.name, companyId: user.companyId, startedAt: Date.now() })
             setPaymentInProgress(true)
-            setMessage('Keep this page open and pay the exact amount in the Paystack window. Leave that window open until Paystack confirms. Closing it leaves the payment abandoned and the bank reverses the money.')
+            setMessage('Pay the exact amount by bank transfer in the Paystack window. You can close that window after sending the transfer — this page will keep waiting for confirmation.')
             const paystack = new window.PaystackPop()
             paystack.resumeTransaction(result.accessCode, {
                 onCancel: () => {
-                    setPaymentInProgress(false)
-                    setLoadingPlan(null)
-                    setMessage('Payment window closed before Paystack confirmed the money. Start again and pay the exact amount without closing this page.')
+                    void watchPayment(result.reference, plan.name, { fromCancel: true })
                 },
                 onError: (error) => {
-                    setPaymentInProgress(false)
-                    setLoadingPlan(null)
-                    setMessage(error instanceof Error ? error.message : 'Unable to open the payment window.')
+                    void watchPayment(result.reference, plan.name)
+                    setMessage(error instanceof Error ? error.message : 'Payment window error. Still checking whether Paystack received the transfer.')
                 },
                 onSuccess: async (transaction) => {
                     const reference = transaction?.reference || result.reference
                     if (!reference) {
                         setPaymentInProgress(false)
                         setLoadingPlan(null)
+                        clearPendingPayment()
                         setMessage('Paystack did not return a payment reference.')
                         return
                     }
-                    await confirmPayment(reference, plan.name)
+                    await watchPayment(reference, plan.name)
                 },
             })
         } catch (error) {
             setPaymentInProgress(false)
             setLoadingPlan(null)
+            clearPendingPayment()
             setMessage(error instanceof Error ? error.message : 'Unable to complete payment.')
         }
     }
@@ -285,7 +360,7 @@ export default function SubscriptionAndLicensingPage() {
                         <p className="pricing-copy">Choose the edition that matches your business today and your growth plans tomorrow. Every edition is backed by a one-time licence fee and a monthly support and maintenance subscription.</p>
                     </div>
                     <div className="hero-actions">
-                        <div className="pricing-note">Pay the exact amount by bank transfer and keep this page open until Paystack confirms. These licence amounts are too large for most cards, and a closed or expired checkout is marked abandoned so the bank reverses the money.</div>
+                        <div className="pricing-note">Pay the exact amount by bank transfer and keep this page open until Paystack confirms. These licence amounts are usually too large for cards. After you send the transfer, this page keeps checking even if the Paystack window is closed.</div>
                     </div>
                 </div>
 

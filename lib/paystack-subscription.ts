@@ -72,3 +72,35 @@ export function paymentMatchesPlan(payment: { amount?: unknown; currency?: unkno
         && metadata.companyId === String(companyId)
         && paidPlan === selectedPlan
 }
+
+/** Paystack defaults this to ~30s; bank transfers for licence amounts need far longer. */
+export const PAYSTACK_BANK_TRANSFER_SESSION_SECONDS = 60 * 60
+
+const PENDING_PAYMENT_STATUSES = new Set(['ongoing', 'pending', 'processing', 'queued', 'pending_bank_transfer'])
+
+export function isPendingPaystackStatus(status: unknown) {
+    return PENDING_PAYMENT_STATUSES.has(String(status || '').toLowerCase())
+}
+
+export async function ensurePaystackPaymentSessionTimeout(secretKey: string, minimumSeconds = PAYSTACK_BANK_TRANSFER_SESSION_SECONDS) {
+    try {
+        const currentResponse = await fetch('https://api.paystack.co/integration/payment_session_timeout', {
+            headers: { Authorization: `Bearer ${secretKey}` },
+        })
+        const currentResult = await currentResponse.json()
+        const current = Number(currentResult?.data?.payment_session_timeout)
+        // 0 disables the timeout entirely, which is also acceptable for bank transfer.
+        if (currentResponse.ok && currentResult.status && (current === 0 || current >= minimumSeconds)) return current
+
+        const updateResponse = await fetch('https://api.paystack.co/integration/payment_session_timeout', {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ timeout: minimumSeconds }),
+        })
+        const updateResult = await updateResponse.json()
+        if (!updateResponse.ok || !updateResult.status) return Number.isFinite(current) ? current : null
+        return Number(updateResult?.data?.payment_session_timeout) || minimumSeconds
+    } catch {
+        return null
+    }
+}
